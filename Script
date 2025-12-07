@@ -1,3 +1,9 @@
+-- ============================================
+-- KILL AURA SCRIPT (EDUCATIONAL PURPOSES ONLY)
+-- ============================================
+-- PATCH 1.2.0: Improved safety, weapon detection, and scanning
+-- ============================================
+
 local Config = {
     Range = 50,
     AuraEnabled = false,
