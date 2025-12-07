@@ -7,7 +7,7 @@ local RunService = game:GetService("RunService")
 
 -- Configuration
 local Config = {
-    Range = 45,
+    Range = 25,
     SwingAnimation = "Swing",
     SwingType = "Over",
     HitZombieEvent = "HitZombie",
