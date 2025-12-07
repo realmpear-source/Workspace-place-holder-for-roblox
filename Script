@@ -14,7 +14,7 @@ local Config = {
         DelayBetweenAttempts = 0.05
     },
     Performance = {
-        MaxZombiesPerCycle = 50, -- Limit to prevent lag
+        MaxZombiesPerCycle = 69, -- Limit to prevent lag
         SkipDistanceCheck = true -- Since range is infinite
     }
 }
