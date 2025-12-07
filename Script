@@ -8,274 +8,357 @@ local RunService = game:GetService("RunService")
 -- Configuration
 local Config = {
     Range = 37,
-    SwingAnimation = "Swing",
-    SwingType = "Over",
-    HitZombieEvent = "HitZombie",
-    GibRemoteName = "Gib",
-    GibBodyPart = "Head",
     Keybind = Enum.KeyCode.F,
     ToggleMode = true,
-    
-    -- List of supported weapons
-    WeaponNames = {
-        "Pickaxe", "Sabre", "Spontoon", "Shovel", "Axe", 
-        "Hand Axe", "Heavy Sabre", "Voivode", "Boarding Axe", 
-        "Stake", "Officer Sabre"
-    }
+    MaxTargetsPerFrame = 3, -- Limit attacks per frame for performance
+    SafetyCheckInterval = 0.5 -- Safety validation interval in seconds
 }
+
+-- Supported weapons for kill aura
+local SupportedWeapons = {
+    "Pickaxe", "Sabre", "Spontoon", "Shovel", "Axe", 
+    "Hand Axe", "Heavy Sabre", "Voivode", "Boarding Axe", 
+    "Stake", "Officer Sabre"
+}
+
+-- Convert to lowercase for case-insensitive matching
+for i, weapon in ipairs(SupportedWeapons) do
+    SupportedWeapons[weapon:lower()] = true
+    SupportedWeapons[i] = nil -- Remove array entries
+end
 
 -- State variables
 local Player = Players.LocalPlayer
 local Character = Player.Character or Player.CharacterAdded:Wait()
 local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
-local ZombiesFolder = Workspace:WaitForChild("Zombies")
-local GibRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild(Config.GibRemoteName)
+local ZombiesFolder = Workspace:WaitForChild("Camera") -- Updated path
+local GibRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gib")
 local CurrentWeaponRemote = nil
+local CurrentWeaponName = nil
 local KillAuraActive = false
+local LastSafetyCheck = 0
 
--- Function to find the correct zombie folder
-local function GetZombiesFolder()
-    local function SearchFolder(folder, targetName)
+-- Find weapon in specified folders
+local function FindWeaponRemote()
+    local function SearchFolder(folder)
         for _, item in ipairs(folder:GetChildren()) do
-            if folder.Name == "Camera" and item.Name ~= "m_Zombie" then
-                -- This is the pattern from your description
-                if item:IsA("Folder") then
-                    local result = SearchFolder(item, targetName)
-                    if result then return result end
+            local itemName = item.Name:lower()
+            if SupportedWeapons[itemName] then
+                local remote = item:FindFirstChild("RemoteEvent")
+                if remote then
+                    return remote, item.Name
                 end
-            elseif item.Name == targetName then
-                return item
-            elseif item:IsA("Folder") then
-                local result = SearchFolder(item, targetName)
-                if result then return result end
             end
         end
         return nil
     end
     
-    -- Try direct path first
-    if Workspace:FindFirstChild("Zombies") then
-        return Workspace.Zombies
-    end
+    -- Search in order: Character, Backpack
+    local charRemote, charName = SearchFolder(Character)
+    if charRemote then return charRemote, charName end
     
-    -- Search through workspace
-    return SearchFolder(Workspace, "Zombies")
-end
-
--- Update zombies folder with search function
-ZombiesFolder = GetZombiesFolder() or Workspace:WaitForChild("Zombies")
-
--- Function to find equipped weapon remote
-local function FindWeaponRemote()
-    -- Check character first (equipped weapons)
-    for _, weaponName in ipairs(Config.WeaponNames) do
-        local weapon = Character:FindFirstChild(weaponName)
-        if weapon then
-            local remote = weapon:FindFirstChild("RemoteEvent")
-            if remote then
-                return remote
-            end
-        end
-    end
-    
-    -- Check backpack (unequipped weapons)
-    for _, weaponName in ipairs(Config.WeaponNames) do
-        local weapon = Player.Backpack:FindFirstChild(weaponName)
-        if weapon then
-            local remote = weapon:FindFirstChild("RemoteEvent")
-            if remote then
-                return remote
-            end
-        end
-    end
+    local backpackRemote, backpackName = SearchFolder(Player:FindFirstChild("Backpack") or Instance.new("Folder"))
+    if backpackRemote then return backpackRemote, backpackName end
     
     return nil
 end
 
 -- Initialize weapon remote
-CurrentWeaponRemote = FindWeaponRemote()
-if not CurrentWeaponRemote then
-    warn("No supported weapon found")
-    return
+local function InitializeWeapon()
+    CurrentWeaponRemote, CurrentWeaponName = FindWeaponRemote()
+    return CurrentWeaponRemote ~= nil
 end
 
--- Character re-equip handler
+-- Character/equipment change handlers
 Player.CharacterAdded:Connect(function(newChar)
     Character = newChar
     HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
-    task.wait(0.3) -- Wait for equipment to load
-    CurrentWeaponRemote = FindWeaponRemote()
+    
+    -- Delay to allow equipment to load
+    task.wait(0.7)
+    InitializeWeapon()
 end)
 
--- Get zombies within range
-local function GetZombiesInRange()
-    local ZombiesInRange = {}
+-- Monitor backpack for weapon changes
+local Backpack = Player:WaitForChild("Backpack")
+Backpack.ChildAdded:Connect(function(child)
+    task.wait(0.1) -- Small delay for remote to be created
+    if SupportedWeapons[child.Name:lower()] then
+        InitializeWeapon()
+    end
+end)
+
+Backpack.ChildRemoved:Connect(function(child)
+    if child.Name == CurrentWeaponName then
+        InitializeWeapon()
+    end
+end)
+
+-- Get valid zombies from Camera folder
+local function GetValidZombies()
+    local ValidZombies = {}
     
-    for _, Zombie in ipairs(ZombiesFolder:GetChildren()) do
-        if Zombie:IsA("Model") then
-            local ZRoot = Zombie:FindFirstChild("HumanoidRootPart")
-            local ZHumanoid = Zombie:FindFirstChildOfClass("Humanoid")
+    if not ZombiesFolder or not ZombiesFolder:IsA("Folder") then
+        return ValidZombies
+    end
+    
+    for _, item in ipairs(ZombiesFolder:GetChildren()) do
+        -- Filter condition: skip if name is "m_Zombie"
+        if item.Name ~= "m_Zombie" and item:IsA("Model") then
+            local zRoot = item:FindFirstChild("HumanoidRootPart")
+            local zHumanoid = item:FindFirstChildOfClass("Humanoid")
             
-            if ZRoot and ZHumanoid and ZHumanoid.Health > 0 then
-                local Distance = (ZRoot.Position - HumanoidRootPart.Position).Magnitude
-                if Distance <= Config.Range then
-                    table.insert(ZombiesInRange, {
-                        Model = Zombie,
-                        Root = ZRoot,
-                        Distance = Distance
+            if zRoot and zHumanoid and zHumanoid.Health > 0 then
+                local distance = (zRoot.Position - HumanoidRootPart.Position).Magnitude
+                if distance <= Config.Range then
+                    table.insert(ValidZombies, {
+                        Model = item,
+                        Root = zRoot,
+                        Distance = distance
                     })
                 end
             end
         end
     end
     
-    -- Sort by distance (closest first)
-    table.sort(ZombiesInRange, function(a, b)
+    -- Sort by distance (nearest first)
+    table.sort(ValidZombies, function(a, b)
         return a.Distance < b.Distance
     end)
     
-    return ZombiesInRange
+    return ValidZombies
 end
 
--- Attack a zombie
-local function AttackZombie(ZombieData)
-    if not CurrentWeaponRemote then 
-        CurrentWeaponRemote = FindWeaponRemote()
-        if not CurrentWeaponRemote then return false end
+-- Safe remote execution with pcall
+local function SafeFireRemote(remote, ...)
+    if not remote or not remote:IsA("RemoteEvent") then
+        return false, "Invalid remote"
     end
     
-    local Zombie = ZombieData.Model
-    local ZHead = Zombie:FindFirstChild("Head")
-    local ZRoot = ZombieData.Root
-    
-    if not ZHead then return false end
-    
-    local HitPosition = ZHead.Position
-    local Direction = (HitPosition - HumanoidRootPart.Position).Unit
-    
-    -- Execute attacks without cooldown
-    local function FireRemote(...)
-        local success, result = pcall(function()
-            CurrentWeaponRemote:FireServer(...)
-        end)
-        return success
-    end
-    
-    -- Swing animation
-    FireRemote(Config.SwingAnimation, Config.SwingType)
-    
-    -- Gib remote
-    pcall(function()
-        GibRemote:FireServer(Zombie, Config.GibBodyPart, HitPosition, Direction)
+    local success, result = pcall(function()
+        remote:FireServer(...)
     end)
     
-    -- Hit zombie
-    FireRemote(Config.HitZombieEvent, Zombie, HitPosition, false)
+    if not success then
+        warn("Remote execution failed:", result)
+    end
+    
+    return success
+end
+
+-- Enhanced safety check
+local function PerformSafetyCheck()
+    local currentTime = tick()
+    
+    -- Throttle safety checks
+    if currentTime - LastSafetyCheck < Config.SafetyCheckInterval then
+        return true
+    end
+    
+    LastSafetyCheck = currentTime
+    
+    -- Check character validity
+    if not Character or not Character.Parent then
+        return false
+    end
+    
+    -- Check humanoid
+    local humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+    
+    -- Check weapon
+    if not InitializeWeapon() then
+        return false
+    end
     
     return true
 end
 
+-- Attack sequence for a single zombie
+local function AttackZombie(zombieData)
+    -- Safety validation
+    if not PerformSafetyCheck() then
+        return false
+    end
+    
+    local zombie = zombieData.Model
+    local zHead = zombie:FindFirstChild("Head")
+    local zRoot = zombieData.Root
+    
+    if not zHead or not zRoot then
+        return false
+    end
+    
+    -- Calculate hit position and direction
+    local hitPosition = zHead.Position
+    local direction = (hitPosition - HumanoidRootPart.Position).Unit
+    
+    -- Execute attack sequence
+    local sequenceSuccess = true
+    
+    -- Swing animation
+    if not SafeFireRemote(CurrentWeaponRemote, "Swing", "Over") then
+        sequenceSuccess = false
+    end
+    
+    -- Gib attack (with additional pcell safety)
+    local gibSuccess = pcall(function()
+        GibRemote:FireServer(zombie, "Head", hitPosition, direction)
+    end)
+    
+    if not gibSuccess then
+        sequenceSuccess = false
+        warn("Gib attack failed")
+    end
+    
+    -- Hit zombie event
+    if not SafeFireRemote(CurrentWeaponRemote, "HitZombie", zombie, hitPosition, false) then
+        sequenceSuccess = false
+    end
+    
+    return sequenceSuccess
+end
+
 -- Main attack loop
 local AttackConnection
-local function ToggleKillAura(State)
-    KillAuraActive = State
+local function ToggleKillAura(state)
+    -- Prevent rapid toggling
+    if KillAuraActive == state then
+        return
+    end
     
+    KillAuraActive = state
+    
+    -- Clean up existing connection
     if AttackConnection then
         AttackConnection:Disconnect()
         AttackConnection = nil
     end
     
     if KillAuraActive then
+        -- Initial weapon check
+        if not InitializeWeapon() then
+            warn("No supported weapon found for kill aura")
+            KillAuraActive = false
+            return
+        end
+        
+        -- Start attack loop
         AttackConnection = RunService.Heartbeat:Connect(function()
-            -- Check for weapon changes every frame
-            if not CurrentWeaponRemote then
-                CurrentWeaponRemote = FindWeaponRemote()
-                if not CurrentWeaponRemote then
-                    ToggleKillAura(false)
-                    return
-                end
+            -- Skip if not safe
+            if not PerformSafetyCheck() then
+                ToggleKillAura(false)
+                return
             end
             
-            local ZombiesInRange = GetZombiesInRange()
+            local zombies = GetValidZombies()
+            local attackCount = 0
             
-            -- Attack all zombies in range without cooldown
-            for _, ZombieData in ipairs(ZombiesInRange) do
-                AttackZombie(ZombieData)
+            -- Attack up to MaxTargetsPerFrame
+            for _, zombieData in ipairs(zombies) do
+                if attackCount >= Config.MaxTargetsPerFrame then
+                    break
+                end
+                
+                if AttackZombie(zombieData) then
+                    attackCount += 1
+                end
+                
+                -- Small yield to prevent freezing
+                if attackCount > 0 then
+                    RunService.Heartbeat:Wait()
+                end
             end
         end)
         
-        print("Kill Aura: ON")
+        print("Kill Aura: ON | Weapon:", CurrentWeaponName or "Unknown")
     else
         print("Kill Aura: OFF")
     end
 end
 
--- Keybind handler
-UserInputService.InputBegan:Connect(function(Input, Processed)
-    if Processed then return end
+-- Keybind handler with safety
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
     
-    if Input.KeyCode == Config.Keybind then
+    if input.KeyCode == Config.Keybind then
+        -- Prevent activation during unsafe states
+        if not PerformSafetyCheck() then
+            warn("Cannot activate kill aura: Safety check failed")
+            return
+        end
+        
         if Config.ToggleMode then
             ToggleKillAura(not KillAuraActive)
         else
-            -- Hold to activate mode
             ToggleKillAura(true)
         end
     end
 end)
 
-UserInputService.InputEnded:Connect(function(Input)
-    if not Config.ToggleMode and Input.KeyCode == Config.Keybind then
+UserInputService.InputEnded:Connect(function(input)
+    if not Config.ToggleMode and input.KeyCode == Config.Keybind then
         ToggleKillAura(false)
     end
 end)
 
--- Cleanup on script termination
-game:GetService("Players").PlayerRemoving:Connect(function(LeavingPlayer)
-    if LeavingPlayer == Player then
-        ToggleKillAura(false)
+-- Cleanup and safety monitors
+local function Cleanup()
+    ToggleKillAura(false)
+    CurrentWeaponRemote = nil
+    CurrentWeaponName = nil
+end
+
+-- Player leaving
+Players.PlayerRemoving:Connect(function(leavingPlayer)
+    if leavingPlayer == Player then
+        Cleanup()
     end
 end)
 
--- Auto-disable on character death
+-- Character death/reset
 Character:GetPropertyChangedSignal("Parent"):Connect(function()
     if not Character.Parent then
-        ToggleKillAura(false)
+        Cleanup()
     end
 end)
 
-Character:WaitForChild("Humanoid").Died:Connect(function()
-    ToggleKillAura(false)
-end)
+local Humanoid = Character:WaitForChild("Humanoid")
+Humanoid.Died:Connect(Cleanup)
 
--- Monitor for weapon changes while equipped
-RunService.Heartbeat:Connect(function()
-    if KillAuraActive then
-        -- Quick check if current weapon is still valid
-        if CurrentWeaponRemote and not CurrentWeaponRemote.Parent then
-            CurrentWeaponRemote = FindWeaponRemote()
+-- Weapon unequipped monitoring
+Character.ChildRemoved:Connect(function(child)
+    if child.Name == CurrentWeaponName then
+        task.wait(0.2) -- Allow time for re-equip
+        if not InitializeWeapon() and KillAuraActive then
+            ToggleKillAura(false)
+            warn("Weapon lost, kill aura disabled")
         end
     end
 end)
 
--- Initialization message
-local weaponList = table.concat(Config.WeaponNames, ", ")
+-- Initialization
+InitializeWeapon()
+
 print(string.format([[
 Stack Overflow Kill Aura v2.0 Initialized
-Keybind: %s
-Range: %d
-Mode: %s
-Supported Weapons: %s
-]], Config.Keybind.Name, Config.Range, Config.ToggleMode and "Toggle" : "Hold", weaponList))
-print("Press " .. Config.Keybind.Name .. " to toggle kill aura")
+Keybind: %s | Mode: %s | Range: %d
+Supported Weapons: %d
+Press %s to toggle
+]], 
+Config.Keybind.Name, 
+Config.ToggleMode and "Toggle" or "Hold", 
+Config.Range,
+#SupportedWeapons,
+Config.Keybind.Name))
 
--- Export configuration for easy modification
+-- Export for debugging/control
 return {
     Config = Config,
     ToggleKillAura = ToggleKillAura,
-    GetStatus = function() return KillAuraActive end,
-    UpdateWeaponList = function(newList)
-        Config.WeaponNames = newList
-        CurrentWeaponRemote = FindWeaponRemote()
-    end
+    GetStatus = function() return KillAuraActive, CurrentWeaponName end,
+    GetZombieCount = function() return #GetValidZombies() end,
+    Cleanup = Cleanup
 }
