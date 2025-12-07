@@ -1,287 +1,302 @@
--- ============================================
--- KILL AURA SCRIPT (EDUCATIONAL PURPOSES ONLY)
--- ============================================
--- PATCH 1.2.0: Improved safety, weapon detection, and scanning
--- ============================================
-
+-- Configuration
 local Config = {
-    Range = 50,
-    AuraEnabled = false,
-    ScanCooldown = 0.1, -- Fast scanning without delay
-    DebugMode = false
+    KillAura = {
+        Enabled = false,
+        Range = 35,
+        Keybind = Enum.KeyCode.X,
+        AttackParts = {"Head", "HumanoidRootPart"}
+    },
+    Safety = {
+        UseSafeCalls = true,
+        MaxAttempts = 3,
+        DelayBetweenAttempts = 0.1
+    }
 }
 
 -- Services
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
 
--- Player references
-local Player = Players.LocalPlayer
-local Character = Player.Character or Player.CharacterAdded:Wait()
-local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+-- Player References
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local root = character:WaitForChild("HumanoidRootPart")
 
--- Remote detection system
-local WeaponRemotes = {}
-local GibRemote = nil
+-- Remotes
+local gibRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gib")
+local sabreRemote = nil
 
--- Zombie folder scanning configuration
-local ZombieFolders = {
-    "Zombies",
-    "Camera", -- Additional folder to scan
-    "Enemies" -- Fallback folder name
-}
-
--- ============================================
--- SAFETY & ERROR HANDLING FUNCTIONS
--- ============================================
-
-local function SafeCall(func, ...)
-    local success, result = pcall(func, ...)
-    if not success and Config.DebugMode then
-        warn("[SafeCall Error]:", result)
+-- Initialize Sabre Remote
+local function InitializeSabreRemote()
+    local function findSabreRemote()
+        local sabreBackpack = player.Backpack:FindFirstChild("Sabre")
+        local sabreChar = character:FindFirstChild("Sabre")
+        
+        if sabreBackpack then
+            return sabreBackpack:WaitForChild("RemoteEvent")
+        elseif sabreChar then
+            return sabreChar:WaitForChild("RemoteEvent")
+        end
+        return nil
     end
-    return success, result
-end
-
-local function Log(message)
-    if Config.DebugMode then
-        print("[Aura]: " .. message)
-    end
-end
-
--- ============================================
--- WEAPON DETECTION SYSTEM
--- ============================================
-
-local function FindWeaponRemote()
-    local weaponNames = {
-        "Sabre", "Pickaxe", "Spontoon", "Spade", "Axe", 
-        "Hand Axe", "Heavy Sabre", "Voivode", "Boarding Axe", 
-        "Stake", "Officer Sabre"
-    }
     
-    -- Search priority: Character -> Backpack -> Workspace
-    local searchLocations = {
-        Character,
-        Player:FindFirstChild("Backpack") or Player.Backpack,
-        Workspace
-    }
-    
-    for _, location in ipairs(searchLocations) do
-        if location then
-            for _, weaponName in ipairs(weaponNames) do
-                local weapon = location:FindFirstChild(weaponName)
-                if weapon then
-                    local remote = weapon:FindFirstChild("RemoteEvent")
-                    if remote then
-                        Log("Found weapon: " .. weaponName)
-                        return remote
-                    end
-                end
+    sabreRemote = findSabreRemote()
+    if not sabreRemote then
+        warn("[KillAura] Sabre not found in backpack or character")
+        
+        -- Listen for Sabre being equipped
+        character.ChildAdded:Connect(function(child)
+            if child.Name == "Sabre" then
+                task.wait(0.5)
+                sabreRemote = child:WaitForChild("RemoteEvent")
+                warn("[KillAura] Sabre detected and remote initialized")
             end
-        end
-    end
-    
-    return nil
-end
-
--- ============================================
--- REMOTE SETUP WITH FALLBACK
--- ============================================
-
-local function SetupRemotes()
-    -- Find Gib remote
-    SafeCall(function()
-        GibRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gib")
-        Log("Gib remote found")
-    end)
-    
-    -- Find weapon remote
-    local weaponRemote = FindWeaponRemote()
-    if weaponRemote then
-        WeaponRemotes["Primary"] = weaponRemote
-        Log("Weapon remote initialized")
-    else
-        warn("[Warning]: No weapon remote found. Aura will not function.")
-    end
-end
-
--- ============================================
--- ZOMBIE SCANNING SYSTEM
--- ============================================
-
-local function GetZombieFolders()
-    local folders = {}
-    
-    for _, folderName in ipairs(ZombieFolders) do
-        local folder = Workspace:FindFirstChild(folderName)
-        if folder then
-            table.insert(folders, folder)
-            Log("Found zombie folder: " .. folderName)
-        end
-    end
-    
-    return folders
-end
-
-local function ScanForZombies()
-    local zombies = {}
-    local zombieFolders = GetZombieFolders()
-    
-    for _, folder in ipairs(zombieFolders) do
-        SafeCall(function()
-            for _, item in ipairs(folder:GetChildren()) do
-                -- Filter for zombies only (excluding non-zombie models)
-                if folder.Name == "Camera" and item.Name == "m_Zombie" then
-                    if item:IsA("Model") and item:FindFirstChild("HumanoidRootPart") then
-                        table.insert(zombies, item)
-                    end
-                elseif folder.Name ~= "Camera" then
-                    -- For other folders, include all models with HumanoidRootPart
-                    if item:IsA("Model") and item:FindFirstChild("HumanoidRootPart") then
-                        table.insert(zombies, item)
-                    end
-                end
+        end)
+        
+        player.Backpack.ChildAdded:Connect(function(child)
+            if child.Name == "Sabre" then
+                sabreRemote = child:WaitForChild("RemoteEvent")
+                warn("[KillAura] Sabre detected in backpack")
             end
         end)
     end
+end
+
+-- Safe Call Wrapper
+local function SafeCall(func, ...)
+    if not Config.Safety.UseSafeCalls then
+        return func(...)
+    end
+    
+    local attempts = 0
+    local lastError = ""
+    
+    while attempts < Config.Safety.MaxAttempts do
+        local success, result = pcall(func, ...)
+        
+        if success then
+            return result
+        else
+            lastError = result
+            attempts += 1
+            if attempts < Config.Safety.MaxAttempts then
+                task.wait(Config.Safety.DelayBetweenAttempts)
+            end
+        end
+    end
+    
+    warn("[SafeCall] Failed after", Config.Safety.MaxAttempts, "attempts. Error:", lastError)
+    return nil
+end
+
+-- Find Zombies in Folder Structure
+local function GetZombies()
+    local zombies = {}
+    
+    local function scanFolder(folder)
+        for _, item in ipairs(folder:GetChildren()) do
+            if item:IsA("Model") then
+                -- Check for zombie model (excluding Camera folder with m_Zombie exception)
+                local folderName = folder.Name
+                if folderName == "Camera" and item.Name ~= "m_Zombie" then
+                    -- Skip non-zombie items in Camera folder
+                    continue
+                end
+                
+                -- Check if it's a zombie (has HumanoidRootPart and likely a zombie)
+                local humanoidRootPart = item:FindFirstChild("HumanoidRootPart")
+                if humanoidRootPart then
+                    table.insert(zombies, item)
+                end
+            elseif item:IsA("Folder") then
+                -- Recursively scan subfolders
+                scanFolder(item)
+            end
+        end
+    end
+    
+    -- Start scanning from Workspace
+    local zombiesFolder = workspace:FindFirstChild("Zombies")
+    if zombiesFolder then
+        scanFolder(zombiesFolder)
+    else
+        -- Fallback: scan entire workspace for zombie models
+        warn("[KillAura] Zombies folder not found, scanning workspace...")
+        for _, model in ipairs(workspace:GetChildren()) do
+            if model:IsA("Model") and model:FindFirstChild("HumanoidRootPart") then
+                -- Basic zombie detection (you might need to adjust this)
+                if model.Name:lower():find("zombie") or model:FindFirstChild("Zombie") then
+                    table.insert(zombies, model)
+                end
+            end
+        end
+    end
     
     return zombies
 end
 
-local function SortZombiesByDistance(zombies)
-    table.sort(zombies, function(a, b)
-        local aDist = (a.HumanoidRootPart.Position - HumanoidRootPart.Position).Magnitude
-        local bDist = (b.HumanoidRootPart.Position - HumanoidRootPart.Position).Magnitude
-        return aDist < bDist
-    end)
-    return zombies
-end
-
-local function IsZombieInRange(zombie)
+-- Distance Check
+local function IsInRange(zombie)
+    if not root then return false end
+    
     local zombieRoot = zombie:FindFirstChild("HumanoidRootPart")
     if not zombieRoot then return false end
     
-    local distance = (zombieRoot.Position - HumanoidRootPart.Position).Magnitude
-    return distance <= Config.Range
+    local distance = (zombieRoot.Position - root.Position).Magnitude
+    return distance <= Config.KillAura.Range
 end
 
--- ============================================
--- ATTACK SYSTEM WITH SAFETY
--- ============================================
+-- Sort Zombies by Distance
+local function SortZombiesByDistance(zombies)
+    if not root then return {} end
+    
+    table.sort(zombies, function(a, b)
+        local aRoot = a:FindFirstChild("HumanoidRootPart")
+        local bRoot = b:FindFirstChild("HumanoidRootPart")
+        
+        if not aRoot then return false end
+        if not bRoot then return true end
+        
+        local distA = (aRoot.Position - root.Position).Magnitude
+        local distB = (bRoot.Position - root.Position).Magnitude
+        
+        return distA < distB
+    end)
+    
+    return zombies
+end
 
+-- Attack Zombie
 local function AttackZombie(zombie)
-    if not WeaponRemotes["Primary"] or not GibRemote then return end
+    if not sabreRemote or not root then return false end
     
-    SafeCall(function()
-        local head = zombie:FindFirstChild("Head")
-        if not head then return end
-        
-        local hitPosition = head.Position
-        local direction = (hitPosition - HumanoidRootPart.Position).Unit
-        
-        -- Swing animation
-        WeaponRemotes["Primary"]:FireServer("Swing", "Over")
-        
-        -- Gib remote
-        GibRemote:FireServer(zombie, "Head", hitPosition, direction)
-        
-        -- Hit detection
-        WeaponRemotes["Primary"]:FireServer("HitZombie", zombie, hitPosition, false)
-        
-        Log("Attacked zombie: " .. zombie.Name)
-    end)
-end
-
-local function ExecuteAura()
-    if not Config.AuraEnabled then return end
-    if not HumanoidRootPart then return end
+    local zombieRoot = zombie:FindFirstChild("HumanoidRootPart")
+    if not zombieRoot then return false end
     
-    SafeCall(function()
-        local zombies = ScanForZombies()
-        local sortedZombies = SortZombiesByDistance(zombies)
-        
-        for _, zombie in ipairs(sortedZombies) do
-            if IsZombieInRange(zombie) then
-                AttackZombie(zombie)
-            end
+    -- Try different attack parts
+    for _, partName in ipairs(Config.KillAura.AttackParts) do
+        local attackPart = zombie:FindFirstChild(partName)
+        if attackPart then
+            local hitPos = attackPart.Position
+            local direction = (hitPos - root.Position).Unit
+            
+            -- Safe remote calls
+            SafeCall(function()
+                sabreRemote:FireServer("Swing", "Over")
+                gibRemote:FireServer(zombie, partName, hitPos, direction)
+                sabreRemote:FireServer("HitZombie", zombie, hitPos, false)
+            end)
+            
+            return true
         end
+    end
+    
+    -- Fallback to root part
+    local hitPos = zombieRoot.Position
+    local direction = (hitPos - root.Position).Unit
+    
+    SafeCall(function()
+        sabreRemote:FireServer("Swing", "Over")
+        gibRemote:FireServer(zombie, "HumanoidRootPart", hitPos, direction)
+        sabreRemote:FireServer("HitZombie", zombie, hitPos, false)
     end)
+    
+    return true
 end
 
--- ============================================
--- INITIALIZATION & CONTROLS
--- ============================================
+-- Main Kill Aura Function
+local function ExecuteKillAura()
+    if not Config.KillAura.Enabled or not sabreRemote then return end
+    
+    local zombies = GetZombies()
+    local nearbyZombies = {}
+    
+    -- Filter zombies in range
+    for _, zombie in ipairs(zombies) do
+        if IsInRange(zombie) then
+            table.insert(nearbyZombies, zombie)
+        end
+    end
+    
+    if #nearbyZombies == 0 then return end
+    
+    -- Sort by distance and attack
+    nearbyZombies = SortZombiesByDistance(nearbyZombies)
+    
+    for _, zombie in ipairs(nearbyZombies) do
+        AttackZombie(zombie)
+    end
+end
 
+-- Toggle Kill Aura
+local function ToggleKillAura()
+    Config.KillAura.Enabled = not Config.KillAura.Enabled
+    warn("[KillAura]", Config.KillAura.Enabled and "Enabled" or "Disabled")
+    
+    if Config.KillAura.Enabled then
+        warn("[KillAura] Range:", Config.KillAura.Range)
+        warn("[KillAura] Keybind:", Config.KillAura.Keybind.Name)
+    end
+end
+
+-- Initialize
 local function Initialize()
-    Log("Initializing Kill Aura...")
+    warn("[KillAura] Initializing...")
     
     -- Wait for character to fully load
-    if not Character:FindFirstChild("Humanoid") then
-        Character:WaitForChild("Humanoid")
+    if not character:FindFirstChild("Humanoid") then
+        character:WaitForChild("Humanoid")
     end
     
-    SetupRemotes()
+    InitializeSabreRemote()
     
     -- Character respawn handler
-    Player.CharacterAdded:Connect(function(newChar)
-        Character = newChar
-        HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
-        Log("Character respawned - references updated")
+    player.CharacterAdded:Connect(function(newChar)
+        character = newChar
+        root = newChar:WaitForChild("HumanoidRootPart")
+        task.wait(1) -- Wait for equipment to load
+        InitializeSabreRemote()
     end)
     
-    -- Main aura loop
-    RunService.Heartbeat:Connect(function()
-        ExecuteAura()
+    -- Keybind handler
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        
+        if input.KeyCode == Config.KillAura.Keybind then
+            ToggleKillAura()
+        end
     end)
     
-    Log("Initialization complete. Aura ready.")
+    -- Main loop
+    local connection
+    connection = RunService.Heartbeat:Connect(function()
+        if Config.KillAura.Enabled then
+            ExecuteKillAura()
+        end
+    end)
+    
+    warn("[KillAura] Initialized successfully")
+    warn("[KillAura] Press", Config.KillAura.Keybind.Name, "to toggle kill aura")
+    
+    return connection
 end
 
--- ============================================
--- CONTROL FUNCTIONS (External API)
--- ============================================
-
-local AuraAPI = {}
-
-function AuraAPI:Toggle()
-    Config.AuraEnabled = not Config.AuraEnabled
-    Log("Aura " .. (Config.AuraEnabled and "ENABLED" or "DISABLED"))
-    return Config.AuraEnabled
+-- Error handling for initialization
+local success, mainConnection = pcall(Initialize)
+if not success then
+    warn("[KillAura] Initialization failed:", mainConnection)
+else
+    warn("[KillAura] Running successfully")
 end
 
-function AuraAPI:SetRange(newRange)
-    if type(newRange) == "number" and newRange > 0 then
-        Config.Range = newRange
-        Log("Range set to: " .. newRange)
-        return true
+-- Cleanup on script termination
+game:GetService("Players").PlayerRemoving:Connect(function(leavingPlayer)
+    if leavingPlayer == player then
+        if mainConnection then
+            mainConnection:Disconnect()
+        end
+        warn("[KillAura] Cleaned up")
     end
-    return false
-end
-
-function AuraAPI:GetStatus()
-    return {
-        Enabled = Config.AuraEnabled,
-        Range = Config.Range,
-        WeaponFound = WeaponRemotes["Primary"] ~= nil,
-        GibFound = GibRemote ~= nil
-    }
-end
-
-function AuraAPI:Reinitialize()
-    SetupRemotes()
-    Log("Reinitialized weapon detection")
-end
-
--- ============================================
--- STARTUP
--- ============================================
-
--- Delay initialization to ensure game is loaded
-task.wait(2)
-Initialize()
-
--- Return API for external control
-return AuraAPI
+end)
