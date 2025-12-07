@@ -1,10 +1,22 @@
+
 -- Configuration
 local Config = {
     KillAura = {
         Enabled = false,
-        Range = 25,
         Keybind = Enum.KeyCode.X,
-        AttackParts = {"Head", "HumanoidRootPart"}
+        AttackParts = {"Head", "HumanoidRootPart"},
+        
+        -- FOV Settings
+        FOV = {
+            UseFOV = true,
+            MaxFOVAngle = 60, -- Degrees (wider angle = more zombies targeted)
+            CheckVisibility = true,
+            UseCrosshairTargeting = false -- Prioritize zombies near crosshair
+        },
+        
+        -- Targeting
+        MaxTargetsPerFrame = 5,
+        SortByAngle = true -- Sort by closest to screen center
     },
     Safety = {
         UseSafeCalls = true,
@@ -18,11 +30,15 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 -- Player References
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local root = character:WaitForChild("HumanoidRootPart")
+
+-- Camera Reference
+local camera = Workspace.CurrentCamera
 
 -- Remotes
 local gibRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gib")
@@ -91,6 +107,68 @@ local function SafeCall(func, ...)
     return nil
 end
 
+-- Calculate if point is within FOV
+local function IsWithinFOV(worldPosition)
+    if not camera or not root then return false end
+    
+    -- Convert world position to screen space
+    local screenPoint, onScreen = camera:WorldToViewportPoint(worldPosition)
+    
+    if not onScreen then
+        return false
+    end
+    
+    if Config.FOV.CheckVisibility then
+        -- Check for obstacles using raycast
+        local rayOrigin = camera.CFrame.Position
+        local rayDirection = (worldPosition - rayOrigin).Unit
+        local raycastResult = Workspace:Raycast(rayOrigin, rayDirection * 1000, {
+            FilterType = Enum.RaycastFilterType.Blacklist,
+            FilterDescendantsInstances = {character}
+        })
+        
+        if raycastResult then
+            local hitInstance = raycastResult.Instance
+            local model = hitInstance:FindFirstAncestorOfClass("Model")
+            if not model or not model:FindFirstChild("HumanoidRootPart") then
+                return false -- Something is blocking the view
+            end
+        end
+    end
+    
+    -- Calculate angle from screen center
+    local viewportSize = camera.ViewportSize
+    local screenCenter = Vector2.new(viewportSize.X / 2, viewportSize.Y / 2)
+    local screenPos = Vector2.new(screenPoint.X, screenPoint.Y)
+    
+    local distanceFromCenter = (screenPos - screenCenter).Magnitude
+    local maxDistance = math.min(viewportSize.X, viewportSize.Y) * 0.4
+    
+    if Config.FOV.UseCrosshairTargeting then
+        -- More strict targeting near crosshair
+        maxDistance = math.min(viewportSize.X, viewportSize.Y) * 0.2
+    end
+    
+    return distanceFromCenter <= maxDistance
+end
+
+-- Calculate FOV angle for sorting
+local function CalculateFOVAngle(worldPosition)
+    if not camera or not root then return 180 end
+    
+    local cameraCFrame = camera.CFrame
+    local cameraLookVector = cameraCFrame.LookVector
+    local directionToTarget = (worldPosition - cameraCFrame.Position).Unit
+    
+    -- Calculate dot product (cosine of angle)
+    local dotProduct = cameraLookVector:Dot(directionToTarget)
+    
+    -- Convert to degrees
+    local angle = math.deg(math.acos(math.clamp(dotProduct, -1, 1)))
+    
+    return angle
+end
+
 -- Find Zombies in Folder Structure
 local function GetZombies()
     local zombies = {}
@@ -107,7 +185,9 @@ local function GetZombies()
                 
                 -- Check if it's a zombie (has HumanoidRootPart and likely a zombie)
                 local humanoidRootPart = item:FindFirstChild("HumanoidRootPart")
-                if humanoidRootPart then
+                local humanoid = item:FindFirstChildOfClass("Humanoid")
+                
+                if humanoidRootPart and humanoid and humanoid.Health > 0 then
                     table.insert(zombies, item)
                 end
             elseif item:IsA("Folder") then
@@ -118,17 +198,22 @@ local function GetZombies()
     end
     
     -- Start scanning from Workspace
-    local zombiesFolder = workspace:FindFirstChild("Zombies")
+    local zombiesFolder = Workspace:FindFirstChild("Zombies")
     if zombiesFolder then
         scanFolder(zombiesFolder)
     else
         -- Fallback: scan entire workspace for zombie models
         warn("[KillAura] Zombies folder not found, scanning workspace...")
-        for _, model in ipairs(workspace:GetChildren()) do
-            if model:IsA("Model") and model:FindFirstChild("HumanoidRootPart") then
-                -- Basic zombie detection (you might need to adjust this)
-                if model.Name:lower():find("zombie") or model:FindFirstChild("Zombie") then
-                    table.insert(zombies, model)
+        for _, model in ipairs(Workspace:GetChildren()) do
+            if model:IsA("Model") then
+                local humanoidRootPart = model:FindFirstChild("HumanoidRootPart")
+                local humanoid = model:FindFirstChildOfClass("Humanoid")
+                
+                if humanoidRootPart and humanoid and humanoid.Health > 0 then
+                    -- Basic zombie detection
+                    if model.Name:lower():find("zombie") or model:FindFirstChild("Zombie") then
+                        table.insert(zombies, model)
+                    end
                 end
             end
         end
@@ -137,33 +222,49 @@ local function GetZombies()
     return zombies
 end
 
--- Distance Check
-local function IsInRange(zombie)
-    if not root then return false end
+-- Filter zombies within FOV
+local function GetZombiesInFOV(zombies)
+    local zombiesInFOV = {}
     
-    local zombieRoot = zombie:FindFirstChild("HumanoidRootPart")
-    if not zombieRoot then return false end
+    for _, zombie in ipairs(zombies) do
+        local zombieRoot = zombie:FindFirstChild("HumanoidRootPart")
+        if zombieRoot then
+            if IsWithinFOV(zombieRoot.Position) then
+                table.insert(zombiesInFOV, zombie)
+            end
+        end
+    end
     
-    local distance = (zombieRoot.Position - root.Position).Magnitude
-    return distance <= Config.KillAura.Range
+    return zombiesInFOV
 end
 
--- Sort Zombies by Distance
-local function SortZombiesByDistance(zombies)
-    if not root then return {} end
+-- Sort Zombies by FOV angle (closest to center)
+local function SortZombiesByFOVAngle(zombies)
+    if #zombies == 0 then return zombies end
     
-    table.sort(zombies, function(a, b)
-        local aRoot = a:FindFirstChild("HumanoidRootPart")
-        local bRoot = b:FindFirstChild("HumanoidRootPart")
-        
-        if not aRoot then return false end
-        if not bRoot then return true end
-        
-        local distA = (aRoot.Position - root.Position).Magnitude
-        local distB = (bRoot.Position - root.Position).Magnitude
-        
-        return distA < distB
-    end)
+    if Config.KillAura.SortByAngle then
+        table.sort(zombies, function(a, b)
+            local aRoot = a:FindFirstChild("HumanoidRootPart")
+            local bRoot = b:FindFirstChild("HumanoidRootPart")
+            
+            if not aRoot then return false end
+            if not bRoot then return true end
+            
+            local angleA = CalculateFOVAngle(aRoot.Position)
+            local angleB = CalculateFOVAngle(bRoot.Position)
+            
+            return angleA < angleB
+        end)
+    end
+    
+    -- Limit targets per frame
+    if #zombies > Config.KillAura.MaxTargetsPerFrame then
+        local limited = {}
+        for i = 1, math.min(Config.KillAura.MaxTargetsPerFrame, #zombies) do
+            table.insert(limited, zombies[i])
+        end
+        return limited
+    end
     
     return zombies
 end
@@ -208,24 +309,19 @@ end
 
 -- Main Kill Aura Function
 local function ExecuteKillAura()
-    if not Config.KillAura.Enabled or not sabreRemote then return end
+    if not Config.KillAura.Enabled or not sabreRemote or not camera then return end
     
     local zombies = GetZombies()
-    local nearbyZombies = {}
+    if #zombies == 0 then return end
     
-    -- Filter zombies in range
-    for _, zombie in ipairs(zombies) do
-        if IsInRange(zombie) then
-            table.insert(nearbyZombies, zombie)
-        end
-    end
+    -- Filter zombies within FOV
+    local zombiesInFOV = GetZombiesInFOV(zombies)
+    if #zombiesInFOV == 0 then return end
     
-    if #nearbyZombies == 0 then return end
+    -- Sort by FOV angle and attack
+    local targets = SortZombiesByFOVAngle(zombiesInFOV)
     
-    -- Sort by distance and attack
-    nearbyZombies = SortZombiesByDistance(nearbyZombies)
-    
-    for _, zombie in ipairs(nearbyZombies) do
+    for _, zombie in ipairs(targets) do
         AttackZombie(zombie)
     end
 end
@@ -236,14 +332,17 @@ local function ToggleKillAura()
     warn("[KillAura]", Config.KillAura.Enabled and "Enabled" or "Disabled")
     
     if Config.KillAura.Enabled then
-        warn("[KillAura] Range:", Config.KillAura.Range)
+        warn("[KillAura] Mode: Infinite Range + FOV Targeting")
         warn("[KillAura] Keybind:", Config.KillAura.Keybind.Name)
+        warn("[KillAura] FOV Angle:", Config.FOV.MaxFOVAngle, "degrees")
+        warn("[KillAura] Max targets per frame:", Config.KillAura.MaxTargetsPerFrame)
     end
 end
 
 -- Initialize
 local function Initialize()
     warn("[KillAura] Initializing...")
+    warn("[KillAura] Version 2.1 - Infinite Range + FOV Targeting")
     
     -- Wait for character to fully load
     if not character:FindFirstChild("Humanoid") then
@@ -260,6 +359,12 @@ local function Initialize()
         InitializeSabreRemote()
     end)
     
+    -- Camera reference update
+    camera = Workspace.CurrentCamera
+    Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        camera = Workspace.CurrentCamera
+    end)
+    
     -- Keybind handler
     UserInputService.InputBegan:Connect(function(input, processed)
         if processed then return end
@@ -269,9 +374,9 @@ local function Initialize()
         end
     end)
     
-    -- Main loop
+    -- Main loop - use RenderStepped for smooth FOV calculations
     local connection
-    connection = RunService.Heartbeat:Connect(function()
+    connection = RunService.RenderStepped:Connect(function()
         if Config.KillAura.Enabled then
             ExecuteKillAura()
         end
