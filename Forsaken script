@@ -1,0 +1,514 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local localPlayer = Players.LocalPlayer
+
+-- ========== ERROR HANDLING ==========
+local function safeCall(func, errorMessage)
+    local success, result = pcall(func)
+    if not success then
+        warn(errorMessage or "Error in safeCall:", result)
+        return nil
+    end
+    return result
+end
+
+-- Wait for player to load with timeout
+if not localPlayer then
+    local startTime = os.clock()
+    local timeout = 10
+    local playerLoaded = false
+    
+    local connection
+    connection = Players:GetPropertyChangedSignal("LocalPlayer"):Connect(function()
+        if Players.LocalPlayer then
+            playerLoaded = true
+            localPlayer = Players.LocalPlayer
+            if connection then connection:Disconnect() end
+        end
+    end)
+    
+    while os.clock() - startTime < timeout and not playerLoaded do
+        task.wait(0.1)
+    end
+    
+    if not playerLoaded then
+        error("Failed to get local player after "..timeout.." seconds")
+        return
+    end
+end
+
+-- ========== CONFIGURATION ==========
+local colors = {
+    survivor = Color3.fromRGB(0, 255, 255),
+    killer = Color3.fromRGB(255, 100, 100),
+    item = Color3.fromRGB(255, 255, 0),
+    generator = Color3.fromRGB(50, 255, 50),
+    minion = Color3.fromRGB(170, 0, 255),
+    ability = Color3.fromRGB(255, 165, 0)
+}
+
+local minionNames = {
+    "PizzaDeliveryRig", 
+    "1x1x1x1Zombie", 
+    "Mafia1", 
+    "Mafia2", 
+    "Mafia3", 
+    "Mafia4",
+    "BlueGuy",
+    "RedGuy",
+    "PurpleGuy",
+    "GreenGuy",
+}
+
+local itemNames = {
+    "Medkit", 
+    "BloxyCola"
+}
+
+local abilityNames = {
+    "Swords", 
+    "Shockwave",
+    "SubspaceTripmine"
+}
+
+local settings = {
+    Keybind = Enum.KeyCode.X,
+    GenTime = 2.5,
+    MaxAttempts = 1,
+    AutoFix = false,
+    AutoFixDelay = 1,
+    HighlightRefreshRate = 1
+}
+
+-- ========== STATE MANAGEMENT ==========
+local activeHighlights = setmetatable({}, {__mode = "v"}) -- Weak table for garbage collection
+local connections = {}
+local highlightConnections = {} -- Connections specifically for highlighting system
+local characterDied = false
+local active = false
+local currentGenerator = nil
+local highlightEnabled = true
+local lastHighlightUpdate = 0
+
+-- ========== UTILITY FUNCTIONS ==========
+local function isPlayerAlive()
+    if characterDied then return false end
+    local character = localPlayer.Character
+    return character and character:FindFirstChildOfClass("Humanoid") and character:FindFirstChildOfClass("Humanoid").Health > 0
+end
+
+local function cleanupHighlight(parent)
+    local highlight = activeHighlights[parent]
+    if highlight and highlight.Parent then
+        highlight:Destroy()
+    end
+    activeHighlights[parent] = nil
+end
+
+-- ========== HIGHLIGHTING SYSTEM ==========
+local function createHighlight(parent, color)
+    if not parent or activeHighlights[parent] then return end
+    
+    return safeCall(function()
+        local highlight = Instance.new("Highlight")
+        highlight.FillTransparency = 1
+        highlight.OutlineColor = color
+        highlight.OutlineTransparency = 0.3
+        highlight.Parent = parent
+        
+        activeHighlights[parent] = highlight
+        
+        -- Auto-cleanup when parent is destroyed
+        local connection
+        connection = parent.AncestryChanged:Connect(function(_, newParent)
+            if newParent == nil then
+                cleanupHighlight(parent)
+                if connection then connection:Disconnect() end
+            end
+        end)
+        
+        return highlight
+    end, "Failed to create highlight for " .. tostring(parent))
+end
+
+local function clearAllHighlights()
+    for parent, highlight in pairs(activeHighlights) do
+        if highlight and highlight.Parent then
+            highlight:Destroy()
+        end
+    end
+    table.clear(activeHighlights)
+end
+
+local function disconnectHighlightConnections()
+    for _, connection in pairs(highlightConnections) do
+        connection:Disconnect()
+    end
+    table.clear(highlightConnections)
+end
+
+local function updateGeneratorHighlights()
+    for parent, highlight in pairs(activeHighlights) do
+        if parent:IsA("Model") and parent.Name == "Generator" and parent:FindFirstChild("Progress") then
+            local progress = parent.Progress.Value
+            if progress >= 100 then
+                cleanupHighlight(parent)
+            end
+        end
+    end
+end
+
+local function handleCharacterDeath(character)
+    cleanupHighlight(character)
+end
+
+local function setupCharacterTracking(character)
+    if not character or not character:IsA("Model") then return end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    -- Track health changes
+    table.insert(highlightConnections, humanoid.HealthChanged:Connect(function(health)
+        if health <= 0 then
+            handleCharacterDeath(character)
+        end
+    end))
+    
+    -- Track destruction
+    table.insert(highlightConnections, character.AncestryChanged:Connect(function(_, newParent)
+        if newParent == nil then
+            handleCharacterDeath(character)
+        end
+    end))
+end
+
+local function processPlayerGroup(group, color)
+    if not group then return end
+    
+    for _, playerModel in ipairs(group:GetChildren()) do
+        if playerModel:IsA("Model") then
+            createHighlight(playerModel, color)
+            setupCharacterTracking(playerModel)
+        end
+    end
+    
+    table.insert(highlightConnections, group.ChildAdded:Connect(function(child)
+        if child:IsA("Model") then
+            createHighlight(child, color)
+            setupCharacterTracking(child)
+        end
+    end))
+end
+
+local function scanObjectsByType(objectList, color, targetType)
+    local objectMap = {}
+    for _, objectName in ipairs(objectList) do
+        objectMap[objectName] = color
+    end
+    
+    local function processObject(obj)
+        if obj:IsA(targetType) and objectMap[obj.Name] then
+            createHighlight(obj, objectMap[obj.Name])
+        end
+    end
+    
+    -- Process existing objects
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        processObject(obj)
+    end
+    
+    -- Process new objects
+    table.insert(highlightConnections, workspace.DescendantAdded:Connect(function(descendant)
+        processObject(descendant)
+    end))
+end
+
+local function scanFolderStructure(rootFolder, targetName, color)
+    if not rootFolder then return end
+    
+    local function scanRecursive(folder)
+        for _, item in ipairs(folder:GetChildren()) do
+            if item:IsA("Folder") then
+                scanRecursive(item)
+            elseif item:IsA("Model") and item.Name == targetName then
+                createHighlight(item, color)
+            end
+        end
+    end
+    
+    scanRecursive(rootFolder)
+    
+    table.insert(highlightConnections, rootFolder.DescendantAdded:Connect(function(descendant)
+        if descendant:IsA("Model") and descendant.Name == targetName then
+            createHighlight(descendant, color)
+        end
+    end))
+end
+
+local function highlightPlayers()
+    local playersFolder = workspace:FindFirstChild("Players")
+    if not playersFolder then return end
+    
+    processPlayerGroup(playersFolder:FindFirstChild("Survivors"), colors.survivor)
+    processPlayerGroup(playersFolder:FindFirstChild("Killers"), colors.killer)
+end
+
+local function highlightItems()
+    scanObjectsByType(itemNames, colors.item, "Model")
+    scanObjectsByType(minionNames, colors.minion, "Model")
+end
+
+local function highlightAbilities()
+    scanObjectsByType(abilityNames, colors.ability, "Model")
+end
+
+local function highlightGenerators()
+    local mapFolder = workspace:FindFirstChild("Map")
+    local ingame = mapFolder and mapFolder:FindFirstChild("Ingame")
+    local generators = ingame and ingame:FindFirstChild("Map")
+    
+    if not generators then return end
+    
+    scanFolderStructure(generators, "Generator", colors.generator)
+end
+
+local function rescanHighlights()
+    clearAllHighlights()
+    disconnectHighlightConnections()
+    
+    highlightPlayers()
+    highlightItems()
+    highlightAbilities()
+    highlightGenerators()
+end
+
+local function toggleHighlights()
+    highlightEnabled = not highlightEnabled
+    
+    if highlightEnabled then
+        rescanHighlights()
+    else
+        clearAllHighlights()
+        disconnectHighlightConnections()
+    end
+end
+
+-- ========== GENERATOR REPAIR SYSTEM ==========
+local function validateGenerator(generator)
+    if not generator or not generator.Parent then return false end
+    
+    return generator:FindFirstChild("Progress") and
+           generator:FindFirstChild("Main") and
+           generator.Main:FindFirstChild("Prompt") and
+           generator:FindFirstChild("Remotes") and
+           generator.Remotes:FindFirstChild("RE")
+end
+
+local function getClosestGenerator()
+    if not isPlayerAlive() then return nil end
+    
+    local character = localPlayer.Character
+    local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return nil end
+
+    local closest = nil
+    local minDistance = math.huge
+
+    local map = workspace:FindFirstChild("Map")
+    local ingame = map and map:FindFirstChild("Ingame")
+    local generators = ingame and ingame:FindFirstChild("Map")
+    
+    if not generators then return nil end
+
+    for _, generator in ipairs(generators:GetDescendants()) do
+        if generator.Name == "Generator" and validateGenerator(generator) then
+            local progress = generator.Progress.Value
+            if progress < 100 then
+                local distance = (generator:GetPivot().Position - rootPart.Position).Magnitude
+                if distance < minDistance then
+                    minDistance = distance
+                    closest = generator
+                end
+            end
+        end
+    end
+
+    return closest
+end
+
+local function attemptFixGenerator()
+    if active or not isPlayerAlive() then return end
+    active = true
+    
+    local generator = getClosestGenerator()
+    if not generator then
+        active = false
+        return
+    end
+
+    currentGenerator = generator
+
+    -- Activate prompt
+    local prompt = generator.Main.Prompt
+    for _ = 1, 3 do
+        if not active or not isPlayerAlive() then break end
+        if prompt and prompt.Parent then
+            fireproximityprompt(prompt, 1)
+        end
+        task.wait(0.1)
+    end
+
+    -- Repair attempts
+    for i = 1, settings.MaxAttempts do
+        if not active or not isPlayerAlive() or not validateGenerator(generator) or generator.Progress.Value >= 100 then 
+            break 
+        end
+        
+        pcall(function()
+            generator.Remotes.RE:FireServer()
+        end)
+        
+        if i < settings.MaxAttempts and generator.Progress.Value < 100 then
+            task.wait(settings.GenTime)
+        end
+    end
+
+    active = false
+    currentGenerator = nil
+end
+
+local function autoFixLoop()
+    while settings.AutoFix do
+        if not active and isPlayerAlive() then
+            local generator = getClosestGenerator()
+            if generator then
+                attemptFixGenerator()
+            end
+        end
+        task.wait(settings.AutoFixDelay)
+    end
+end
+
+-- ========== AUTO POPUP SYSTEM ==========
+local function handleAutoPopups()
+    while true do
+        local playerGui = localPlayer:FindFirstChild("PlayerGui")
+        local temporaryUI = playerGui and playerGui:FindFirstChild("TemporaryUI")
+        
+        if temporaryUI then
+            for _, popup in ipairs(temporaryUI:GetChildren()) do
+                if popup.Name == "1x1x1x1Popup" then
+                    local centerX = popup.AbsolutePosition.X + (popup.AbsoluteSize.X / 2)
+                    local centerY = popup.AbsolutePosition.Y + (popup.AbsoluteSize.Y / 2) + 50
+                    
+                    VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, playerGui, 1)
+                    VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, playerGui, 1)
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end
+
+-- ========== EVENT HANDLERS ==========
+local function onCharacterDeath()
+    characterDied = true
+    active = false
+    currentGenerator = nil
+    clearAllHighlights()
+end
+
+local function onCharacterAdded(character)
+    characterDied = false
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    
+    if humanoid then
+        table.insert(connections, humanoid.Died:Connect(onCharacterDeath))
+    end
+    
+    task.wait(1)
+    if highlightEnabled then
+        rescanHighlights()
+    end
+end
+
+-- ========== INITIALIZATION ==========
+local function initialize()
+    -- Cleanup existing connections
+    for _, connection in ipairs(connections) do
+        connection:Disconnect()
+    end
+    table.clear(connections)
+
+    -- Input handling
+    if not settings.AutoFix then
+        table.insert(connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed or characterDied or settings.AutoFix then return end
+            if input.KeyCode == settings.Keybind then
+                task.spawn(attemptFixGenerator)
+            end
+        end))
+    end
+
+    -- Highlight toggle
+    table.insert(connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if input.KeyCode == Enum.KeyCode.P then
+            toggleHighlights()
+        end
+    end))
+
+    -- Character tracking
+    if localPlayer.Character then
+        local humanoid = localPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            table.insert(connections, humanoid.Died:Connect(onCharacterDeath))
+        end
+    end
+    
+    table.insert(connections, localPlayer.CharacterAdded:Connect(onCharacterAdded))
+
+    -- Periodic updates
+    table.insert(connections, RunService.Heartbeat:Connect(function()
+        if highlightEnabled and os.clock() - lastHighlightUpdate > settings.HighlightRefreshRate then
+            updateGeneratorHighlights()
+            lastHighlightUpdate = os.clock()
+        end
+    end))
+
+    -- Start systems
+    if settings.AutoFix then
+        task.spawn(autoFixLoop)
+    end
+    
+    task.spawn(handleAutoPopups)
+    
+    -- Initial highlighting
+    if highlightEnabled then
+        rescanHighlights()
+    end
+end
+
+local function cleanup()
+    active = false
+    currentGenerator = nil
+    
+    for _, connection in ipairs(connections) do
+        connection:Disconnect()
+    end
+    table.clear(connections)
+    
+    disconnectHighlightConnections()
+    clearAllHighlights()
+end
+
+-- Safe initialization
+local success, err = pcall(initialize)
+if not success then
+    warn("Initialization error: " .. tostring(err))
+end
+
+-- Return cleanup function
+return cleanup
