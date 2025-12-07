@@ -1,15 +1,3 @@
--- Stack Overflow Zombie Aura - Patch v1.3
--- Patch Notes:
--- 1. Added ACTIVE weapon detection that continuously scans
--- 2. Removed ESP/Chams system
--- 3. Removed GUI interface
--- 4. Optimized zombie scanning with model name filtering
--- 5. Added comprehensive error handling and fallbacks
--- 6. Implemented pcall safety for all operations
--- 7. Fixed typos and improved readability
--- 8. Increased range to 50
--- 9. Added fast attack rate (0.1 seconds per hit)
-
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
