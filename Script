@@ -1,12 +1,3 @@
--- Stack Overflow Kill Aura
--- Version: 1.1
--- Patch Notes:
--- 1. Removed attack cooldown system for maximum efficiency
--- 2. Added custom zombie path detection with folder filtering
--- 3. Enhanced safety with pcall wrappers and error handling
--- 4. Added zombie model name filtering (excludes "m_Zombie" from Camera folder)
--- 5. Improved performance with optimized loops
-
 -- Services
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -16,7 +7,7 @@ local RunService = game:GetService("RunService")
 
 -- Configuration
 local Config = {
-    Range = 25,
+    Range = 45,
     SwingAnimation = "Swing",
     SwingType = "Over",
     HitZombieEvent = "HitZombie",
@@ -26,8 +17,8 @@ local Config = {
     RemoteEventName = "RemoteEvent",
     Keybind = Enum.KeyCode.F,
     ToggleMode = true,
-    FilterFolderName = "Camera", -- Folder to search for zombies
-    ExcludeModelName = "m_Zombie" -- Model name to exclude from Camera folder
+    FilterFolderName = "Camera",
+    ExcludeModelName = "m_Zombie"
 }
 
 -- State variables
