@@ -2,10 +2,9 @@
 local Config = {
     KillAura = {
         Enabled = false,
-        Range = 48,
+        Range = 25,
         Keybind = Enum.KeyCode.X,
-        AttackParts = {"Head", "HumanoidRootPart"},
-        SupportedWeapons = {"Sabre", "Axe"}
+        AttackParts = {"Head", "HumanoidRootPart"}
     },
     Safety = {
         UseSafeCalls = true,
@@ -27,130 +26,41 @@ local root = character:WaitForChild("HumanoidRootPart")
 
 -- Remotes
 local gibRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gib")
-local weaponRemote = nil
-local currentWeapon = nil
-local weaponCache = {}
+local sabreRemote = nil
 
--- Initialize Weapon Remote
-local function InitializeWeaponRemote()
-    local function findWeaponRemote()
-        -- Check character first (equipped weapons)
-        for _, weaponName in ipairs(Config.KillAura.SupportedWeapons) do
-            local weaponInChar = character:FindFirstChild(weaponName)
-            if weaponInChar then
-                local remote = weaponInChar:FindFirstChild("RemoteEvent")
-                if remote then
-                    currentWeapon = weaponName
-                    weaponCache[weaponName] = remote
-                    return remote
-                end
-            end
-        end
+-- Initialize Sabre Remote
+local function InitializeSabreRemote()
+    local function findSabreRemote()
+        local sabreBackpack = player.Backpack:FindFirstChild("Sabre")
+        local sabreChar = character:FindFirstChild("Sabre")
         
-        -- Check backpack (unequipped weapons)
-        for _, weaponName in ipairs(Config.KillAura.SupportedWeapons) do
-            local weaponInBackpack = player.Backpack:FindFirstChild(weaponName)
-            if weaponInBackpack then
-                local remote = weaponInBackpack:FindFirstChild("RemoteEvent")
-                if remote then
-                    currentWeapon = weaponName
-                    weaponCache[weaponName] = remote
-                    return remote
-                end
-            end
+        if sabreBackpack then
+            return sabreBackpack:WaitForChild("RemoteEvent")
+        elseif sabreChar then
+            return sabreChar:WaitForChild("RemoteEvent")
         end
-        
-        -- Check cache if we found weapons previously
-        for weaponName, remote in pairs(weaponCache) do
-            if remote and remote.Parent then
-                currentWeapon = weaponName
-                return remote
-            end
-        end
-        
         return nil
     end
     
-    weaponRemote = findWeaponRemote()
-    if not weaponRemote then
-        warn("[KillAura] No supported weapons found (Sabre/Axe)")
+    sabreRemote = findSabreRemote()
+    if not sabreRemote then
+        warn("[KillAura] Sabre not found in backpack or character")
         
-        -- Listen for weapons being equipped/added
-        local function setupWeaponListeners()
-            -- Character equipped weapons
-            character.ChildAdded:Connect(function(child)
-                for _, weaponName in ipairs(Config.KillAura.SupportedWeapons) do
-                    if child.Name == weaponName then
-                        task.wait(0.5) -- Wait for remote to be added
-                        local remote = child:WaitForChild("RemoteEvent", 2)
-                        if remote then
-                            weaponCache[weaponName] = remote
-                            weaponRemote = remote
-                            currentWeapon = weaponName
-                            warn("[KillAura]", weaponName, "detected and remote initialized")
-                        end
-                    end
-                end
-            end)
-            
-            -- Backpack weapons
-            player.Backpack.ChildAdded:Connect(function(child)
-                for _, weaponName in ipairs(Config.KillAura.SupportedWeapons) do
-                    if child.Name == weaponName then
-                        local remote = child:FindFirstChild("RemoteEvent")
-                        if remote then
-                            weaponCache[weaponName] = remote
-                            -- Don't set as active if not equipped
-                            warn("[KillAura]", weaponName, "detected in backpack")
-                        end
-                    end
-                end
-            end)
-        end
-        
-        setupWeaponListeners()
-    else
-        warn("[KillAura] Using", currentWeapon, "as current weapon")
-    end
-end
-
--- Update weapon when switching
-local function UpdateCurrentWeapon()
-    -- Check equipped weapons first
-    for _, weaponName in ipairs(Config.KillAura.SupportedWeapons) do
-        local weaponInChar = character:FindFirstChild(weaponName)
-        if weaponInChar then
-            local remote = weaponInChar:FindFirstChild("RemoteEvent")
-            if remote then
-                if currentWeapon ~= weaponName then
-                    currentWeapon = weaponName
-                    weaponRemote = remote
-                    weaponCache[weaponName] = remote
-                    warn("[KillAura] Switched to", weaponName)
-                end
-                return
+        -- Listen for Sabre being equipped
+        character.ChildAdded:Connect(function(child)
+            if child.Name == "Sabre" then
+                task.wait(0.5)
+                sabreRemote = child:WaitForChild("RemoteEvent")
+                warn("[KillAura] Sabre detected and remote initialized")
             end
-        end
-    end
-    
-    -- Check cached weapons
-    for weaponName, remote in pairs(weaponCache) do
-        if remote and remote.Parent then
-            currentWeapon = weaponName
-            weaponRemote = remote
-            warn("[KillAura] Using cached", weaponName)
-            return
-        end
-    end
-    
-    -- Fallback to first available remote
-    for weaponName, remote in pairs(weaponCache) do
-        if remote then
-            currentWeapon = weaponName
-            weaponRemote = remote
-            warn("[KillAura] Fallback to", weaponName)
-            return
-        end
+        end)
+        
+        player.Backpack.ChildAdded:Connect(function(child)
+            if child.Name == "Sabre" then
+                sabreRemote = child:WaitForChild("RemoteEvent")
+                warn("[KillAura] Sabre detected in backpack")
+            end
+        end)
     end
 end
 
@@ -216,7 +126,7 @@ local function GetZombies()
         warn("[KillAura] Zombies folder not found, scanning workspace...")
         for _, model in ipairs(workspace:GetChildren()) do
             if model:IsA("Model") and model:FindFirstChild("HumanoidRootPart") then
-                -- Basic zombie detection
+                -- Basic zombie detection (you might need to adjust this)
                 if model.Name:lower():find("zombie") or model:FindFirstChild("Zombie") then
                     table.insert(zombies, model)
                 end
@@ -258,51 +168,9 @@ local function SortZombiesByDistance(zombies)
     return zombies
 end
 
--- Weapon-specific attack functions
-local function AttackWithSabre(zombie, attackPart, hitPos, direction)
-    if weaponRemote then
-        SafeCall(function()
-            weaponRemote:FireServer("Swing", "Over")
-            gibRemote:FireServer(zombie, attackPart.Name, hitPos, direction)
-            weaponRemote:FireServer("HitZombie", zombie, hitPos, false)
-        end)
-        return true
-    end
-    return false
-end
-
-local function AttackWithAxe(zombie, attackPart, hitPos, direction)
-    if weaponRemote then
-        SafeCall(function()
-            -- Axe might have different remote events
-            -- Try common patterns
-            local success = pcall(function()
-                weaponRemote:FireServer("Swing")
-            end)
-            
-            if not success then
-                weaponRemote:FireServer("Attack")
-            end
-            
-            gibRemote:FireServer(zombie, attackPart.Name, hitPos, direction)
-            
-            -- Try hit detection
-            pcall(function()
-                weaponRemote:FireServer("Hit", zombie, hitPos)
-            end)
-        end)
-        return true
-    end
-    return false
-end
-
--- Generic attack function that routes to weapon-specific handler
+-- Attack Zombie
 local function AttackZombie(zombie)
-    if not weaponRemote or not root then return false end
-    
-    -- Update current weapon before attacking
-    UpdateCurrentWeapon()
-    if not weaponRemote then return false end
+    if not sabreRemote or not root then return false end
     
     local zombieRoot = zombie:FindFirstChild("HumanoidRootPart")
     if not zombieRoot then return false end
@@ -314,19 +182,14 @@ local function AttackZombie(zombie)
             local hitPos = attackPart.Position
             local direction = (hitPos - root.Position).Unit
             
-            -- Route to weapon-specific attack function
-            if currentWeapon == "Sabre" then
-                return AttackWithSabre(zombie, attackPart, hitPos, direction)
-            elseif currentWeapon == "Axe" then
-                return AttackWithAxe(zombie, attackPart, hitPos, direction)
-            else
-                -- Generic attack for unknown weapons
-                SafeCall(function()
-                    weaponRemote:FireServer("Swing")
-                    gibRemote:FireServer(zombie, partName, hitPos, direction)
-                end)
-                return true
-            end
+            -- Safe remote calls
+            SafeCall(function()
+                sabreRemote:FireServer("Swing", "Over")
+                gibRemote:FireServer(zombie, partName, hitPos, direction)
+                sabreRemote:FireServer("HitZombie", zombie, hitPos, false)
+            end)
+            
+            return true
         end
     end
     
@@ -334,28 +197,18 @@ local function AttackZombie(zombie)
     local hitPos = zombieRoot.Position
     local direction = (hitPos - root.Position).Unit
     
-    if currentWeapon == "Sabre" then
-        return AttackWithSabre(zombie, zombieRoot, hitPos, direction)
-    elseif currentWeapon == "Axe" then
-        return AttackWithAxe(zombie, zombieRoot, hitPos, direction)
-    else
-        SafeCall(function()
-            weaponRemote:FireServer("Swing")
-            gibRemote:FireServer(zombie, "HumanoidRootPart", hitPos, direction)
-        end)
-        return true
-    end
+    SafeCall(function()
+        sabreRemote:FireServer("Swing", "Over")
+        gibRemote:FireServer(zombie, "HumanoidRootPart", hitPos, direction)
+        sabreRemote:FireServer("HitZombie", zombie, hitPos, false)
+    end)
+    
+    return true
 end
 
 -- Main Kill Aura Function
 local function ExecuteKillAura()
-    if not Config.KillAura.Enabled or not weaponRemote then 
-        -- Try to find a weapon if not found
-        if Config.KillAura.Enabled and not weaponRemote then
-            UpdateCurrentWeapon()
-        end
-        return 
-    end
+    if not Config.KillAura.Enabled or not sabreRemote then return end
     
     local zombies = GetZombies()
     local nearbyZombies = {}
@@ -380,42 +233,31 @@ end
 -- Toggle Kill Aura
 local function ToggleKillAura()
     Config.KillAura.Enabled = not Config.KillAura.Enabled
+    warn("[KillAura]", Config.KillAura.Enabled and "Enabled" or "Disabled")
     
     if Config.KillAura.Enabled then
-        -- Ensure we have a weapon before enabling
-        UpdateCurrentWeapon()
-        if weaponRemote then
-            warn("[KillAura] Enabled - Using", currentWeapon or "Unknown weapon")
-            warn("[KillAura] Range:", Config.KillAura.Range)
-            warn("[KillAura] Keybind:", Config.KillAura.Keybind.Name)
-        else
-            warn("[KillAura] Failed to enable - No weapon found")
-            Config.KillAura.Enabled = false
-        end
-    else
-        warn("[KillAura] Disabled")
+        warn("[KillAura] Range:", Config.KillAura.Range)
+        warn("[KillAura] Keybind:", Config.KillAura.Keybind.Name)
     end
 end
 
 -- Initialize
 local function Initialize()
     warn("[KillAura] Initializing...")
-    warn("[KillAura] Supported weapons:", table.concat(Config.KillAura.SupportedWeapons, ", "))
     
     -- Wait for character to fully load
     if not character:FindFirstChild("Humanoid") then
         character:WaitForChild("Humanoid")
     end
     
-    InitializeWeaponRemote()
+    InitializeSabreRemote()
     
     -- Character respawn handler
     player.CharacterAdded:Connect(function(newChar)
         character = newChar
         root = newChar:WaitForChild("HumanoidRootPart")
         task.wait(1) -- Wait for equipment to load
-        weaponCache = {} -- Clear cache on respawn
-        InitializeWeaponRemote()
+        InitializeSabreRemote()
     end)
     
     -- Keybind handler
@@ -427,18 +269,9 @@ local function Initialize()
         end
     end)
     
-    -- Periodic weapon update (handles weapon switching)
-    local weaponUpdateConnection
-    weaponUpdateConnection = RunService.Heartbeat:Connect(function(deltaTime)
-        -- Update weapon every 0.5 seconds
-        if tick() % 0.5 < deltaTime then
-            UpdateCurrentWeapon()
-        end
-    end)
-    
-    -- Main kill aura loop
-    local killAuraConnection
-    killAuraConnection = RunService.Heartbeat:Connect(function()
+    -- Main loop
+    local connection
+    connection = RunService.Heartbeat:Connect(function()
         if Config.KillAura.Enabled then
             ExecuteKillAura()
         end
@@ -447,16 +280,13 @@ local function Initialize()
     warn("[KillAura] Initialized successfully")
     warn("[KillAura] Press", Config.KillAura.Keybind.Name, "to toggle kill aura")
     
-    return {
-        KillAura = killAuraConnection,
-        WeaponUpdate = weaponUpdateConnection
-    }
+    return connection
 end
 
 -- Error handling for initialization
-local success, connections = pcall(Initialize)
+local success, mainConnection = pcall(Initialize)
 if not success then
-    warn("[KillAura] Initialization failed:", connections)
+    warn("[KillAura] Initialization failed:", mainConnection)
 else
     warn("[KillAura] Running successfully")
 end
@@ -464,21 +294,9 @@ end
 -- Cleanup on script termination
 game:GetService("Players").PlayerRemoving:Connect(function(leavingPlayer)
     if leavingPlayer == player then
-        if connections then
-            for _, connection in pairs(connections) do
-                if connection then
-                    connection:Disconnect()
-                end
-            end
+        if mainConnection then
+            mainConnection:Disconnect()
         end
         warn("[KillAura] Cleaned up")
     end
 end)
-
--- Export configuration for external access (optional)
-return {
-    Config = Config,
-    ToggleKillAura = ToggleKillAura,
-    GetCurrentWeapon = function() return currentWeapon end,
-    GetWeaponRemote = function() return weaponRemote end
-}
