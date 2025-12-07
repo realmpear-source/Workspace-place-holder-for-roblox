@@ -2,7 +2,7 @@
 local Config = {
     KillAura = {
         Enabled = false,
-        Range = 25,
+        Range = 40,
         Keybind = Enum.KeyCode.X,
         AttackParts = {"Head", "HumanoidRootPart"}
     },
