@@ -1,322 +1,263 @@
--- Stack Overflow Kill Aura
--- Version: 1.2 (Error Fixed)
--- Fixed: "attempt to call nil value" error
+local range         = 25
+local auratrue      = false
+local esptrue       = false
+local zombies       = game:GetService("Workspace"):WaitForChild("Zombies")
+local player        = game:GetService("Players").LocalPlayer
+local char          = player.Character or player.CharacterAdded:Wait()
+local root          = char:WaitForChild("HumanoidRootPart")
+local gib           = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Gib")
+local sabreRemote   = nil
 
--- Safe service retrieval
-local function GetService(serviceName)
-    local success, service = pcall(function()
-        return game:GetService(serviceName)
-    end)
-    return success and service or nil
+local sabrebackpack = player.Backpack:FindFirstChild("Sabre")
+local sabrechar     = char:FindFirstChild("Sabre")
+if sabrebackpack then 
+sabreRemote         = sabrebackpack:WaitForChild("RemoteEvent")
+elseif sabrechar then
+    sabreRemote     = sabrechar:WaitForChild("RemoteEvent")
+else
+    warn("no sabre found in either the backpack or the character") 
 end
 
--- Get services safely
-local Players = GetService("Players")
-local Workspace = GetService("Workspace")
-local ReplicatedStorage = GetService("ReplicatedStorage")
-local UserInputService = GetService("UserInputService")
-local RunService = GetService("RunService")
-
--- Verify all services exist
-if not (Players and Workspace and ReplicatedStorage and UserInputService and RunService) then
-    warn("Failed to get required services")
-    return
+local function rangefind(z)
+    local zroot = z:FindFirstChild("HumanoidRootPart")
+    return zroot and (zroot.Position - root.Position).Magnitude <= range
 end
 
--- Configuration
-local Config = {
-    Range = 25,
-    SwingAnimation = "Swing",
-    SwingType = "Over",
-    HitZombieEvent = "HitZombie",
-    GibRemoteName = "Gib",
-    GibBodyPart = "Head",
-    SabreName = "Sabre",
-    RemoteEventName = "RemoteEvent",
-    Keybind = Enum.KeyCode.F,
-    ToggleMode = true,
-    ZombiesFolderName = "Zombies" -- Changed from custom path to simple folder name
-}
+local function tablesort()
+    local zlister = {}
+    for i, v in ipairs(zombies:GetChildren()) do
+        if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") then
+        table.insert(zlister, v) end
+    end
 
--- State variables
-local Player = Players.LocalPlayer
-local Character, HumanoidRootPart, ZombiesFolder, GibRemote, SabreRemote
-local KillAuraActive = false
-local AttackConnection = nil
-
--- Safe wait for character
-local function WaitForCharacter()
-    local success, result = pcall(function()
-        if Player.Character then
-            return Player.Character
-        else
-            return Player.CharacterAdded:Wait()
-        end
-    end)
-    return success and result or nil
+    table.sort(zlister, function(a, b)
+        return (a.HumanoidRootPart.Position - root.Position).Magnitude < (b.HumanoidRootPart.Position - root.Position).Magnitude end)
+    return zlister
 end
 
--- Safe wait for child
-local function SafeWaitForChild(parent, childName, timeout)
-    timeout = timeout or 5
-    local startTime = tick()
-    
-    while tick() - startTime < timeout do
-        local child = parent:FindFirstChild(childName)
-        if child then
-            return child
-        end
-        task.wait(0.1)
-    end
-    return nil
-end
-
--- Initialize everything safely
-local function Initialize()
-    print("Initializing Kill Aura...")
-    
-    -- Get character
-    Character = WaitForCharacter()
-    if not Character then
-        warn("Failed to get character")
-        return false
-    end
-    
-    -- Get HumanoidRootPart
-    HumanoidRootPart = SafeWaitForChild(Character, "HumanoidRootPart", 3)
-    if not HumanoidRootPart then
-        warn("Failed to find HumanoidRootPart")
-        return false
-    end
-    
-    -- Get Zombies folder
-    ZombiesFolder = SafeWaitForChild(Workspace, Config.ZombiesFolderName, 5)
-    if not ZombiesFolder then
-        warn("Zombies folder not found in Workspace")
-        return false
-    end
-    
-    -- Get Gib remote
-    local remotesFolder = SafeWaitForChild(ReplicatedStorage, "Remotes", 3)
-    if remotesFolder then
-        GibRemote = SafeWaitForChild(remotesFolder, Config.GibRemoteName, 3)
-    end
-    
-    if not GibRemote then
-        warn("Gib remote not found, continuing without it")
-    end
-    
-    -- Find Sabre
-    local function FindSabre()
-        -- Check backpack
-        local backpack = Player:FindFirstChild("Backpack")
-        if backpack then
-            local sabre = backpack:FindFirstChild(Config.SabreName)
-            if sabre then
-                return sabre
+local function attackZ()
+    if auratrue then
+        for _, z in ipairs(tablesort()) do
+            if rangefind(z) then
+                local zHead = z:FindFirstChild("Head")
+                if zHead then
+                    local hitPos = zHead.Position
+                    local dir = (hitPos - root.Position).Unit
+                    sabreRemote:FireServer("Swing", "Over")
+                    gib:FireServer(z, "Head", hitPos, dir)
+                    sabreRemote:FireServer("HitZombie", z, hitPos, false)
+                end
             end
         end
-        
-        -- Check character
-        local sabre = Character:FindFirstChild(Config.SabreName)
-        if sabre then
-            return sabre
+    end
+end
+
+local function zombichams(z)
+    local cg = game:GetService("CoreGui")
+    local fn = "foldchms_" .. tostring(z:GetDebugId())
+
+    for _, v in pairs(cg:GetChildren()) do
+        if v.Name == fn then
+            v:Destroy()
         end
-        
-        return nil
     end
-    
-    local sabre = FindSabre()
-    if sabre then
-        SabreRemote = SafeWaitForChild(sabre, Config.RemoteEventName, 2)
+
+    local chams = Instance.new("Folder")
+    chams.Name = fn
+    chams.Parent = cg
+
+    local parts = {"Torso", "Head", "HumanoidRootPart", "Left Leg", "Right Leg", "Left Arm", "Right Arm"}
+    for _, pName in ipairs(parts) do
+        local part = z:FindFirstChild(pName)
+        if part then
+            local adorn = Instance.new("BoxHandleAdornment")
+            adorn.Name = "adorn_" .. part.Name
+            adorn.Parent = chams
+            adorn.Adornee = part
+            adorn.AlwaysOnTop = true
+            adorn.ZIndex = 10
+            adorn.Size = part.Size
+            adorn.Transparency = 0.7
+            adorn.Color3 = Color3.new(0, 0, 0)
+        end
     end
-    
-    if not SabreRemote then
-        warn("Sabre remote not found, kill aura will not work")
-        return false
-    end
-    
-    print("Initialization complete!")
-    return true
+
+    z.AncestryChanged:Connect(function()
+        if not z:IsDescendantOf(game) then
+            chams:Destroy()
+        end
+    end)
 end
 
--- Attempt initialization
-if not Initialize() then
-    warn("Kill Aura initialization failed")
-    return
+local function freshReload()
+    for _, z in ipairs(zombies:GetChildren()) do
+        if z:IsA("Model") and not game:GetService("CoreGui"):FindFirstChild(z.Name .. "_CHMS") then
+            zombichams(z)
+        end
+    end
 end
 
--- Character re-equip handler
-Player.CharacterAdded:Connect(function(newChar)
-    task.wait(0.5) -- Wait for character to load
-    Initialize()
+local scrgui = Instance.new("ScreenGui")
+scrgui.Name = "598124HTG0GJSDG092QJNVSA09KD1890214"
+scrgui.Parent = game:GetService("CoreGui")
+scrgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local frm = Instance.new("Frame")
+frm.Name = "85901YHJ"
+frm.Parent = scrgui
+frm.Position = UDim2.new(0.554938257, 0, 0.390486717, 0)
+frm.Size = UDim2.new(0, 337, 0, 404)
+frm.Active = true
+frm.Draggable = true
+frm.BackgroundColor3 = Color3.new(0.188235, 0.188235, 0.188235)
+frm.BackgroundTransparency = 0.15
+frm.BorderSizePixel = 0
+
+local frmCorner = Instance.new("UICorner")
+frmCorner.Parent = frm
+
+local frmHead = Instance.new("Frame")
+frmHead.Name = "overhead"
+frmHead.Parent = frm
+frmHead.Size = UDim2.new(0, 337, 0, 68)
+frmHead.Active = true
+frmHead.BackgroundColor3 = Color3.new(0.32549, 0.32549, 0.32549)
+frmHead.BackgroundTransparency = 0.55
+frmHead.BorderSizePixel = 0
+
+local frmHeadCorner = Instance.new("UICorner")
+frmHeadCorner.Parent = frmHead
+
+local txtLabel = Instance.new("TextLabel")
+txtLabel.Name = "stackof"
+txtLabel.Parent = frm
+txtLabel.Size = UDim2.new(0, 336, 0, 79)
+txtLabel.BackgroundTransparency = 1
+txtLabel.Text = "Stack Overflow"
+txtLabel.TextColor3 = Color3.new(0.854902, 0.854902, 0.854902)
+txtLabel.TextScaled = true
+txtLabel.Font = Enum.Font.SourceSansBold
+
+local txtLabelCorner = Instance.new("UICorner")
+txtLabelCorner.Parent = txtLabel
+
+local killBtn = Instance.new("TextButton")
+killBtn.Name = "aurabtn"
+killBtn.Parent = frm
+killBtn.Position = UDim2.new(0.201780409, 0, 0.235148519, 0)
+killBtn.Size = UDim2.new(0, 200, 0, 50)
+killBtn.BackgroundColor3 = Color3.new(0.678431, 0.678431, 0.678431)
+killBtn.BackgroundTransparency = 0.76
+killBtn.Text = "Kill Aura"
+killBtn.TextColor3 = Color3.new(0, 0, 0)
+killBtn.TextScaled = true
+killBtn.Font = Enum.Font.SourceSansBold
+
+local killBtnCorner = Instance.new("UICorner")
+killBtnCorner.Parent = killBtn
+
+local killKeyBtn = Instance.new("TextButton")
+killKeyBtn.Name = "setkeybindbtn"
+killKeyBtn.Parent = killBtn
+killKeyBtn.Position = UDim2.new(-0.245, 0, 0.16, 0)
+killKeyBtn.Size = UDim2.new(0, 33, 0, 33)
+killKeyBtn.BackgroundColor3 = Color3.new(146, 146, 146)
+killKeyBtn.BackgroundTransparency = 0.3
+killKeyBtn.Text = "bind"
+killKeyBtn.TextColor3 = Color3.new(0, 0, 0)
+killKeyBtn.TextScaled = true
+killKeyBtn.Font = Enum.Font.SourceSansBold
+
+local killKeyBtnCorner = Instance.new("UICorner")
+killKeyBtnCorner.Parent = killKeyBtn
+
+local espBtn = Instance.new("TextButton")
+espBtn.Name = "espbtn"
+espBtn.Parent = frm
+espBtn.Position = UDim2.new(0.201780409, 0, 0.400000000, 0)
+espBtn.Size = UDim2.new(0, 200, 0, 50)
+espBtn.BackgroundColor3 = Color3.new(0.678431, 0.678431, 0.678431)
+espBtn.BackgroundTransparency = 0.76
+espBtn.Text = "Zombie Chams"
+espBtn.TextColor3 = Color3.new(0, 0, 0)
+espBtn.TextScaled = true
+espBtn.Font = Enum.Font.SourceSansBold
+
+local espBtnCorner = Instance.new("UICorner")
+espBtnCorner.Parent = espBtn
+
+local destroyBtn = Instance.new("TextButton")
+destroyBtn.Name = "destroy"
+destroyBtn.Parent = frm
+destroyBtn.Position = UDim2.new(0.569732964, 0, 0.866336644, 0)
+destroyBtn.Size = UDim2.new(0, 128, 0, 43)
+destroyBtn.BackgroundColor3 = Color3.new(0.494118, 0.494118, 0.494118)
+destroyBtn.Text = "SCRAP UI"
+destroyBtn.TextColor3 = Color3.new(0.901961, 0.901961, 0.901961)
+destroyBtn.TextScaled = true
+destroyBtn.Font = Enum.Font.SourceSansBold
+
+local destroyBtnCorner = Instance.new("UICorner")
+destroyBtnCorner.Parent = destroyBtn
+
+local keybind = nil
+local settingKey = false
+
+destroyBtn.MouseButton1Click:Connect(function()
+    keybind = nil
+    settingKey = false
+    auratrue = false
+    esptrue = false
+    killBtn.BackgroundColor3 = Color3.new(0.678431, 0.678431, 0.678431)
+    espBtn.BackgroundColor3 = Color3.new(0.678431, 0.678431, 0.678431)
+
+    local cg = game:GetService("CoreGui")
+    for _, v in pairs(cg:GetChildren()) do
+        if string.match(v.Name, "foldchms_") then
+            v:Destroy()
+        end
+    end
+
+    scrgui:Destroy()
 end)
 
--- Get zombies in range
-local function GetZombiesInRange()
-    local zombies = {}
-    
-    if not ZombiesFolder then return zombies end
-    
-    for _, zombie in ipairs(ZombiesFolder:GetChildren()) do
-        if zombie:IsA("Model") then
-            local rootPart = zombie:FindFirstChild("HumanoidRootPart")
-            local humanoid = zombie:FindFirstChildOfClass("Humanoid")
-            
-            if rootPart and humanoid then
-                local success, health = pcall(function()
-                    return humanoid.Health
-                end)
-                
-                if success and health > 0 then
-                    local distance = (rootPart.Position - HumanoidRootPart.Position).Magnitude
-                    if distance <= Config.Range then
-                        table.insert(zombies, {
-                            Model = zombie,
-                            Root = rootPart,
-                            Distance = distance
-                        })
-                    end
-                end
-            end
+killBtn.MouseButton1Click:Connect(function()
+    auratrue = not auratrue
+    killBtn.BackgroundColor3 = auratrue and Color3.new(0, 1, 0) or Color3.new(0.678431, 0.678431, 0.678431)
+end)
+
+killKeyBtn.MouseButton1Click:Connect(function()
+    settingKey = true
+    killKeyBtn.Text = "..."
+end)
+
+game:GetService("UserInputService").InputBegan:Connect(function(input, processed)
+    if settingKey and not processed then
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            keybind = input.KeyCode
+            killKeyBtn.Text = input.KeyCode.Name
+            settingKey = false
         end
     end
-    
-    -- Sort by distance
-    table.sort(zombies, function(a, b)
-        return a.Distance < b.Distance
-    end)
-    
-    return zombies
-end
 
--- Safe remote call
-local function SafeFireRemote(remote, ...)
-    if not remote then return false end
-    
-    local args = {...}
-    local success = pcall(function()
-        remote:FireServer(unpack(args))
-    end)
-    
-    return success
-end
+    if input.KeyCode == keybind then
+        auratrue = not auratrue
+        killBtn.BackgroundColor3 = auratrue and Color3.new(0, 1, 0) or Color3.new(0.678431, 0.678431, 0.678431)
+    end
+end)
 
--- Attack a zombie
-local function AttackZombie(zombieData)
-    if not SabreRemote or not KillAuraActive then return false end
-    
-    local zombie = zombieData.Model
-    local rootPart = zombieData.Root
-    
-    -- Get head
-    local head = zombie:FindFirstChild("Head")
-    if not head then return false end
-    
-    -- Calculate direction
-    local hitPosition = head.Position
-    local direction = (hitPosition - HumanoidRootPart.Position).Unit
-    
-    -- Execute attack
-    local success = true
-    
-    -- Swing animation
-    if not SafeFireRemote(SabreRemote, Config.SwingAnimation, Config.SwingType) then
-        success = false
-    end
-    
-    -- Gib attack (if available)
-    if GibRemote then
-        if not SafeFireRemote(GibRemote, zombie, Config.GibBodyPart, hitPosition, direction) then
-            success = false
-        end
-    end
-    
-    -- Hit zombie
-    if not SafeFireRemote(SabreRemote, Config.HitZombieEvent, zombie, hitPosition, false) then
-        success = false
-    end
-    
-    return success
-end
+espBtn.MouseButton1Click:Connect(function()
+    esptrue = not esptrue
+    espBtn.BackgroundColor3 = esptrue and Color3.new(0, 1, 0) or Color3.new(0.678431, 0.678431, 0.678431)
 
--- Toggle kill aura
-local function ToggleKillAura(state)
-    KillAuraActive = state
-    
-    -- Disconnect existing connection
-    if AttackConnection then
-        AttackConnection:Disconnect()
-        AttackConnection = nil
-    end
-    
-    -- Start new connection if enabled
-    if KillAuraActive then
-        AttackConnection = RunService.Heartbeat:Connect(function()
-            local zombies = GetZombiesInRange()
-            for _, zombieData in ipairs(zombies) do
-                if KillAuraActive then
-                    AttackZombie(zombieData)
-                else
-                    break
-                end
-            end
-        end)
-        print("Kill Aura: ON")
+    if esptrue then
+        freshReload()
     else
-        print("Kill Aura: OFF")
-    end
-end
-
--- Keybind handler
-if UserInputService then
-    UserInputService.InputBegan:Connect(function(input, processed)
-        if processed then return end
-        
-        if input.KeyCode == Config.Keybind then
-            if Config.ToggleMode then
-                ToggleKillAura(not KillAuraActive)
-            else
-                ToggleKillAura(true)
+        local cg = game:GetService("CoreGui")
+        for _, v in pairs(cg:GetChildren()) do
+            if string.match(v.Name, "foldchms_") then
+                v:Destroy()
             end
         end
-    end)
-    
-    if not Config.ToggleMode then
-        UserInputService.InputEnded:Connect(function(input)
-            if input.KeyCode == Config.Keybind then
-                ToggleKillAura(false)
-            end
-        end)
-    end
-end
-
--- Cleanup
-local function Cleanup()
-    if AttackConnection then
-        AttackConnection:Disconnect()
-        AttackConnection = nil
-    end
-    KillAuraActive = false
-end
-
--- Auto cleanup on leaving
-game:BindToClose(Cleanup)
-
-Player:GetPropertyChangedSignal("Parent"):Connect(function()
-    if not Player.Parent then
-        Cleanup()
     end
 end)
-
--- Death handler
-local humanoid = Character:FindFirstChildOfClass("Humanoid")
-if humanoid then
-    humanoid.Died:Connect(function()
-        Cleanup()
-    end)
-end
-
--- Success message
-print("Kill Aura loaded successfully!")
-print("Press " .. Config.Keybind.Name .. " to toggle")
