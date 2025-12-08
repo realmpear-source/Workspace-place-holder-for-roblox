@@ -1,158 +1,202 @@
-local range = 30
-local auratrue = false
-local keybind = Enum.KeyCode.X
-local zombies = workspace:WaitForChild("Zombies")
-local player = game.Players.LocalPlayer
-local char = player.Character or player.CharacterAdded:Wait()
-local root = char:WaitForChild("HumanoidRootPart")
-local humanoid = char:WaitForChild("Humanoid")
+-- Configuration
+local KILL_AURA_RANGE = 30
+local KEYBIND = Enum.KeyCode.X
+local ATTACK_COOLDOWN = 0.5
+local SEARCH_COOLDOWN = 0.1
 
 -- Weapon definitions
-local swingWeapons = {"Pickaxe", "Sabre", "Axe", "OfficersSabre"}
-local thrustWeapons = {"HeavySabre", "Stake", "pike", "Spontoon", "lance"}
-local weaponsList = {}
-for _, v in ipairs(swingWeapons) do weaponsList[v] = "Swing" end
-for _, v in ipairs(thrustWeapons) do weaponsList[v] = "Thrust" end
+local SWING_WEAPONS = {"Pickaxe", "Sabre", "Axe", "OfficersSabre"}
+local THRUST_WEAPONS = {"HeavySabre", "Stake", "pike", "Spontoon", "lance"}
 
--- Remote cache
-local currentRemote = nil
-local currentWeaponType = nil
-local weaponName = nil
-
--- Get remote with error handling
-local function getRemote(name, path)
-    local success, result = pcall(function() return path:WaitForChild(name, 2) end)
-    return success and result or nil
+local WEAPON_TYPES = {}
+for _, weapon in ipairs(SWING_WEAPONS) do
+    WEAPON_TYPES[weapon] = "Swing"
+end
+for _, weapon in ipairs(THRUST_WEAPONS) do
+    WEAPON_TYPES[weapon] = "Thrust"
 end
 
-local gib = getRemote("Gib", game.ReplicatedStorage.Remotes)
+-- State management
+local auraActive = false
+local equippedRemote = nil
+local equippedWeaponName = nil
+local attackType = nil
 
--- Find weapon in containers
-local function findWeaponRemote()
-    for _, container in ipairs({player.Backpack, char}) do
-        for weapon, attackType in pairs(weaponsList) do
-            local weaponObj = container:FindFirstChild(weapon)
-            if weaponObj then
-                local remote = weaponObj:FindFirstChild("RemoteEvent")
+-- Services
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+
+-- Game objects
+local player = Players.LocalPlayer
+local zombies = Workspace:WaitForChild("Zombies")
+
+-- Character references (will be updated)
+local character, humanoidRootPart, humanoid
+
+-- Initialize character
+local function initializeCharacter()
+    character = player.Character or player.CharacterAdded:Wait()
+    humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    humanoid = character:WaitForChild("Humanoid")
+end
+
+-- Safe remote getter
+local function getRemote(name, parent)
+    local success, remote = pcall(function()
+        return parent:WaitForChild(name, 2)
+    end)
+    return success and remote or nil
+end
+
+local gibRemote = getRemote("Gib", game.ReplicatedStorage.Remotes)
+
+-- Weapon management
+local function findEquippedWeapon()
+    for _, container in ipairs({player.Backpack, character}) do
+        for weaponName, weaponAttackType in pairs(WEAPON_TYPES) do
+            local weapon = container:FindFirstChild(weaponName)
+            if weapon then
+                local remote = weapon:FindFirstChild("RemoteEvent")
                 if remote then
-                    currentWeaponType = attackType
-                    weaponName = weapon
+                    equippedWeaponName = weaponName
+                    attackType = weaponAttackType
                     return remote
                 end
             end
         end
     end
-    currentWeaponType = nil
-    weaponName = nil
     return nil
 end
 
--- Monitor weapon changes
-local function monitorWeapons(container)
+local function updateWeapon()
+    local newRemote = findEquippedWeapon()
+    
+    if newRemote ~= equippedRemote then
+        equippedRemote = newRemote
+        
+        if not equippedRemote then
+            auraActive = false
+            equippedWeaponName = nil
+            attackType = nil
+            print("Weapon lost. Kill Aura disabled.")
+        else
+            print("Weapon equipped:", equippedWeaponName, "(" .. attackType .. ")")
+        end
+    end
+end
+
+local function setupWeaponMonitoring(container)
+    if not container then return end
+    
     container.ChildAdded:Connect(function(child)
-        if weaponsList[child.Name] then
-            task.wait(0.1) -- Wait for RemoteEvent to be added
-            currentRemote = findWeaponRemote()
+        if WEAPON_TYPES[child.Name] then
+            task.wait(0.2) -- Wait for RemoteEvent to load
+            updateWeapon()
         end
     end)
     
     container.ChildRemoved:Connect(function(child)
-        if child.Name == weaponName then
-            currentRemote = findWeaponRemote()
-            if not currentRemote then auratrue = false end
+        if child.Name == equippedWeaponName then
+            updateWeapon()
         end
     end)
 end
 
--- Initialize weapon monitoring
-for _, container in ipairs({player.Backpack, char}) do
-    monitorWeapons(container)
-end
-
-currentRemote = findWeaponRemote()
-
--- Check if item is valid zombie
-local function isValidZombie(item)
-    if not item:IsA("Model") then return false end
-    if not item:FindFirstChild("HumanoidRootPart") then return false end
+-- Zombie validation
+local function isValidZombie(zombieModel)
+    if not zombieModel:IsA("Model") then return false end
+    if not zombieModel:FindFirstChild("HumanoidRootPart") then return false end
     
-    local folder = item.Parent
-    if folder and folder.Name == "Camera" and item.Name ~= "m_Zombie" then
+    local parentFolder = zombieModel.Parent
+    if parentFolder and parentFolder.Name == "Camera" and zombieModel.Name ~= "m_Zombie" then
         return false
     end
     
     return true
 end
 
--- Get all zombies in range
+-- Get zombies in range
 local function getZombiesInRange()
     local zombiesInRange = {}
-    for _, item in ipairs(zombies:GetChildren()) do
-        if isValidZombie(item) then
-            local zRoot = item.HumanoidRootPart
-            if zRoot and (zRoot.Position - root.Position).Magnitude <= range then
-                table.insert(zombiesInRange, item)
+    
+    for _, zombie in ipairs(zombies:GetChildren()) do
+        if isValidZombie(zombie) then
+            local zombieRoot = zombie.HumanoidRootPart
+            local distance = (zombieRoot.Position - humanoidRootPart.Position).Magnitude
+            
+            if distance <= KILL_AURA_RANGE then
+                table.insert(zombiesInRange, zombie)
             end
         end
     end
+    
     return zombiesInRange
 end
 
 -- Face nearest zombie
-local function faceNearestZombie(zombiesInRange)
-    if #zombiesInRange == 0 then return end
+local function faceNearestZombie(zombiesList)
+    if #zombiesList == 0 then return end
     
-    local nearest = zombiesInRange[1]
-    local nearestDist = (nearest.HumanoidRootPart.Position - root.Position).Magnitude
+    local nearestZombie = nil
+    local shortestDistance = math.huge
     
-    for i = 2, #zombiesInRange do
-        local dist = (zombiesInRange[i].HumanoidRootPart.Position - root.Position).Magnitude
-        if dist < nearestDist then
-            nearest = zombiesInRange[i]
-            nearestDist = dist
+    for _, zombie in ipairs(zombiesList) do
+        local distance = (zombie.HumanoidRootPart.Position - humanoidRootPart.Position).Magnitude
+        if distance < shortestDistance then
+            shortestDistance = distance
+            nearestZombie = zombie
         end
     end
     
-    -- Face zombie without walking
-    char:PivotTo(CFrame.new(root.Position, Vector3.new(
-        nearest.HumanoidRootPart.Position.X,
-        root.Position.Y,
-        nearest.HumanoidRootPart.Position.Z
-    )))
+    if nearestZombie then
+        local lookPosition = Vector3.new(
+            nearestZombie.HumanoidRootPart.Position.X,
+            humanoidRootPart.Position.Y,
+            nearestZombie.HumanoidRootPart.Position.Z
+        )
+        
+        character:PivotTo(CFrame.new(humanoidRootPart.Position, lookPosition))
+    end
 end
 
 -- Attack all zombies in range
 local function attackAllZombies()
-    if not auratrue or not currentRemote or not currentWeaponType then return 0 end
-    
     local zombiesInRange = getZombiesInRange()
     if #zombiesInRange == 0 then return 0 end
     
     -- Face nearest zombie
     faceNearestZombie(zombiesInRange)
     
-    -- Fire attack animation once based on weapon type
-    if currentWeaponType == "Swing" then
-        pcall(function() currentRemote:FireServer("Swing", "Over") end)
-    else -- Thrust
-        pcall(function() currentRemote:FireServer("Thrust") end)
+    -- Perform attack animation based on weapon type
+    if equippedRemote then
+        if attackType == "Swing" then
+            pcall(function()
+                equippedRemote:FireServer("Swing", "Over")
+            end)
+        elseif attackType == "Thrust" then
+            pcall(function()
+                equippedRemote:FireServer("Thrust")
+            end)
+        end
     end
     
-    -- Attack all zombies in range
+    -- Attack each zombie
     local attackCount = 0
+    
     for _, zombie in ipairs(zombiesInRange) do
-        local zHead = zombie:FindFirstChild("Head")
-        if zHead then
-            local hitPos = zHead.Position
-            local dir = (hitPos - root.Position).Unit
+        local head = zombie:FindFirstChild("Head")
+        if head and equippedRemote then
+            local hitPosition = head.Position
+            local direction = (hitPosition - humanoidRootPart.Position).Unit
             
+            -- Send hit event
             pcall(function()
-                -- Send hit event
-                currentRemote:FireServer("HitZombie", zombie, hitPos, false)
+                equippedRemote:FireServer("HitZombie", zombie, hitPosition, false)
                 
-                -- Send gib event if available
-                if gib then
-                    gib:FireServer(zombie, "Head", hitPos, dir)
+                -- Optional: Send gib event
+                if gibRemote then
+                    gibRemote:FireServer(zombie, "Head", hitPosition, direction)
                 end
                 
                 attackCount += 1
@@ -163,53 +207,74 @@ local function attackAllZombies()
     return attackCount
 end
 
--- Handle death
-local function handleDeath()
-    auratrue = false
-    print("Kill Aura: Disabled (Player died)")
+-- Death handling
+local function onCharacterDied()
+    auraActive = false
+    equippedRemote = nil
+    equippedWeaponName = nil
+    attackType = nil
+    print("Character died. Kill Aura reset.")
 end
 
--- Set up death monitoring
-humanoid.Died:Connect(handleDeath)
-
--- Character respawn handling
-player.CharacterAdded:Connect(function(newChar)
-    char = newChar
-    root = char:WaitForChild("HumanoidRootPart")
-    humanoid = char:WaitForChild("Humanoid")
+-- Input handling
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed or input.KeyCode ~= KEYBIND then return end
     
-    -- Re-monitor for weapons
-    currentRemote = findWeaponRemote()
-    
-    -- Set up death monitoring again
-    humanoid.Died:Connect(handleDeath)
-    
-    -- Monitor new character for weapons
-    monitorWeapons(char)
+    if equippedRemote then
+        auraActive = not auraActive
+        local status = auraActive and "ACTIVATED" or "DEACTIVATED"
+        print("Kill Aura " .. status .. " | Weapon: " .. (equippedWeaponName or "None"))
+    else
+        print("No weapon equipped! Cannot activate Kill Aura.")
+    end
 end)
 
--- Keybind setup
-game:GetService("UserInputService").InputBegan:Connect(function(input, processed)
-    if not processed and input.KeyCode == keybind then
-        if currentRemote then
-            auratrue = not auratrue
-            print("Kill Aura:", auratrue and "ON" or "OFF", "| Weapon:", weaponName or "None")
-        else
-            print("No weapon equipped!")
-        end
-    end
+-- Main initialization
+initializeCharacter()
+
+-- Set up weapon monitoring
+setupWeaponMonitoring(player.Backpack)
+setupWeaponMonitoring(character)
+
+-- Initial weapon scan
+updateWeapon()
+
+-- Death monitoring
+humanoid.Died:Connect(onCharacterDied)
+
+-- Character respawn handling
+player.CharacterAdded:Connect(function(newCharacter)
+    character = newCharacter
+    humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    humanoid = character:WaitForChild("Humanoid")
+    
+    -- Reset state
+    auraActive = false
+    equippedRemote = nil
+    equippedWeaponName = nil
+    attackType = nil
+    
+    -- Set up monitoring for new character
+    setupWeaponMonitoring(character)
+    updateWeapon()
+    
+    -- New death connection
+    humanoid.Died:Connect(onCharacterDied)
+    
+    print("Character respawned. Kill Aura ready.")
 end)
 
 -- Main loop
 while true do
-    if auratrue and humanoid.Health > 0 then
-        local attacked = attackAllZombies()
-        if attacked > 0 then
-            task.wait(0.1) -- Attack cooldown
+    if auraActive and humanoid and humanoid.Health > 0 then
+        local attackedCount = attackAllZombies()
+        
+        if attackedCount > 0 then
+            task.wait(ATTACK_COOLDOWN)
         else
-            task.wait(0.2) -- Search cooldown
+            task.wait(SEARCH_COOLDOWN)
         end
     else
-        task.wait(0.1)
+        task.wait(SEARCH_COOLDOWN)
     end
 end
