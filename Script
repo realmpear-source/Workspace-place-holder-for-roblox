@@ -1,5 +1,5 @@
 -- CONFIGURATION
-local RANGE = 30
+local RANGE = 27
 local KEYBIND = Enum.KeyCode.X
 local WEAPONS = { "Sabre", "Axe" }
 local UPDATE_INTERVAL = 0.1
