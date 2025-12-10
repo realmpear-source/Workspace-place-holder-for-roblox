@@ -1,5 +1,5 @@
 -- CONFIGURATION
-local RANGE = 25
+local RANGE = 30
 local KEYBIND = Enum.KeyCode.X
 local WEAPONS = { "Sabre", "Axe" }
 local PRIORITY_ZOMBIE_NAME = "BarrelZombie"
@@ -24,6 +24,7 @@ local equippedWeapon, weaponRemote
 local zombieCache = {}
 local priorityOutlines = {}
 local lastUpdate = tick()
+local cleanupConnections = {}
 
 -- INITIALIZE PLAYER
 local function initializeCharacter()
@@ -68,13 +69,13 @@ local function monitorWeaponChanges()
         end
     end
     
-    player.Backpack.ChildAdded:Connect(function(child)
+    table.insert(cleanupConnections, player.Backpack.ChildAdded:Connect(function(child)
         onChildAdded(child, "Backpack")
-    end)
+    end))
     
-    character.ChildAdded:Connect(function(child)
+    table.insert(cleanupConnections, character.ChildAdded:Connect(function(child)
         onChildAdded(child, "Character")
-    end)
+    end))
 end
 
 -- PRIORITY ZOMBIE HIGHLIGHTING
@@ -94,14 +95,14 @@ local function createPriorityOutline(zombie)
     priorityOutlines[zombie] = highlight
     
     -- Cleanup when zombie is removed
-    zombie.AncestryChanged:Connect(function(_, parent)
+    table.insert(cleanupConnections, zombie.AncestryChanged:Connect(function(_, parent)
         if not parent then
             if priorityOutlines[zombie] then
                 priorityOutlines[zombie]:Destroy()
                 priorityOutlines[zombie] = nil
             end
         end
-    end)
+    end))
 end
 
 local function cleanupOutlines()
@@ -311,7 +312,8 @@ local function updateConsoleStatus()
 end
 
 -- HEARTBEAT LOOP
-RunService.Heartbeat:Connect(function()
+local heartbeatConnection
+heartbeatConnection = RunService.Heartbeat:Connect(function()
     if auraEnabled then
         mainLoop()
         
@@ -323,18 +325,55 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- CLEANUP ON GAME LEAVE
-game:BindToClose(function()
+table.insert(cleanupConnections, heartbeatConnection)
+
+-- CLEANUP FUNCTION
+local function cleanupScript()
+    print("[Kill Aura] Cleaning up...")
+    
+    -- Disconnect all connections
+    for _, connection in ipairs(cleanupConnections) do
+        if connection then
+            connection:Disconnect()
+        end
+    end
+    
+    -- Remove all outlines
     for _, outline in pairs(priorityOutlines) do
         outline:Destroy()
+    end
+    priorityOutlines = {}
+    
+    print("[Kill Aura] Cleanup complete")
+end
+
+-- AUTO-CLEANUP ON PLAYER LEAVE
+local function onPlayerLeaving()
+    cleanupScript()
+end
+
+table.insert(cleanupConnections, Players.PlayerRemoving:Connect(function(leavingPlayer)
+    if leavingPlayer == player then
+        onPlayerLeaving()
+    end
+end))
+
+-- MANUAL CLEANUP HOTKEY (Optional - Alt+X)
+UserInputService.InputBegan:Connect(function(input, processed)
+    if not processed and input.KeyCode == Enum.KeyCode.X and 
+       (UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or 
+        UserInputService:IsKeyDown(Enum.KeyCode.RightAlt)) then
+        cleanupScript()
+        print("[Kill Aura] Manual cleanup triggered")
     end
 end)
 
 -- INITIALIZATION MESSAGE
 print("=======================================")
-print("[Kill Aura v2.0] Initialized")
+print("[Kill Aura v2.1] Initialized")
 print("=======================================")
-print("Keybind: " .. KEYBIND.Name)
+print("Keybind: " .. KEYBIND.Name .. " (toggle aura)")
+print("Alt+" .. KEYBIND.Name .. " (manual cleanup)")
 print("Range: " .. RANGE .. " studs")
 print("Priority Target: " .. PRIORITY_ZOMBIE_NAME)
 print("Weapons: " .. table.concat(WEAPONS, ", "))
