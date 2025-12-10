@@ -1,7 +1,9 @@
 -- CONFIGURATION
-local RANGE = 27
+local RANGE = 25
 local KEYBIND = Enum.KeyCode.X
 local WEAPONS = { "Sabre", "Axe" }
+local PRIORITY_ZOMBIE_NAME = "BarrelZombie"
+local PRIORITY_COLOR = Color3.fromRGB(255, 255, 0) -- Yellow
 local UPDATE_INTERVAL = 0.1
 
 -- SERVICES
@@ -18,11 +20,17 @@ local zombiesFolder = Workspace:WaitForChild("Zombies")
 local gibRemote = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Gib")
 local equippedWeapon, weaponRemote
 
+-- CACHE
+local zombieCache = {}
+local priorityOutlines = {}
+local lastUpdate = tick()
+
 -- INITIALIZE PLAYER
 local function initializeCharacter()
     character = player.Character or player.CharacterAdded:Wait()
     rootPart = character:WaitForChild("HumanoidRootPart")
     humanoid = character:WaitForChild("Humanoid")
+    zombieCache = {} -- Reset cache on character change
 end
 
 initializeCharacter()
@@ -31,17 +39,15 @@ player.CharacterAdded:Connect(initializeCharacter)
 -- WEAPON MANAGEMENT
 local function findWeapon()
     for _, weaponName in ipairs(WEAPONS) do
-        -- Check character first
         local weapon = character:FindFirstChild(weaponName)
         if weapon and weapon:FindFirstChild("RemoteEvent") then
             return weapon, weapon.RemoteEvent
         end
         
-        -- Check backpack
         if player.Backpack then
-            local backpackWeapon = player.Backpack:FindFirstChild(weaponName)
-            if backpackWeapon and backpackWeapon:FindFirstChild("RemoteEvent") then
-                return backpackWeapon, backpackWeapon.RemoteEvent
+            weapon = player.Backpack:FindFirstChild(weaponName)
+            if weapon and weapon:FindFirstChild("RemoteEvent") then
+                return weapon, weapon.RemoteEvent
             end
         end
     end
@@ -53,21 +59,58 @@ local function updateWeapon()
     return weaponRemote ~= nil
 end
 
--- Listen for weapon changes
+-- MONITOR WEAPON CHANGES
 local function monitorWeaponChanges()
-    player.Backpack.ChildAdded:Connect(function(child)
+    local function onChildAdded(child, containerName)
         if table.find(WEAPONS, child.Name) then
-            task.wait(0.2) -- Small delay for RemoteEvent to load
+            task.wait(0.1)
             updateWeapon()
         end
+    end
+    
+    player.Backpack.ChildAdded:Connect(function(child)
+        onChildAdded(child, "Backpack")
     end)
     
     character.ChildAdded:Connect(function(child)
-        if table.find(WEAPONS, child.Name) then
-            task.wait(0.2)
-            updateWeapon()
+        onChildAdded(child, "Character")
+    end)
+end
+
+-- PRIORITY ZOMBIE HIGHLIGHTING
+local function createPriorityOutline(zombie)
+    if priorityOutlines[zombie] then return end
+    
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "PriorityOutline"
+    highlight.Adornee = zombie
+    highlight.FillColor = PRIORITY_COLOR
+    highlight.FillTransparency = 0.8
+    highlight.OutlineColor = PRIORITY_COLOR
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = Workspace
+    
+    priorityOutlines[zombie] = highlight
+    
+    -- Cleanup when zombie is removed
+    zombie.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            if priorityOutlines[zombie] then
+                priorityOutlines[zombie]:Destroy()
+                priorityOutlines[zombie] = nil
+            end
         end
     end)
+end
+
+local function cleanupOutlines()
+    for zombie, outline in pairs(priorityOutlines) do
+        if not zombie or not zombie.Parent or zombie.Parent ~= zombiesFolder then
+            outline:Destroy()
+            priorityOutlines[zombie] = nil
+        end
+    end
 end
 
 -- ZOMBIE MANAGEMENT
@@ -78,7 +121,6 @@ local function isValidZombie(zombie)
     local humanoidRootPart = zombie:FindFirstChild("HumanoidRootPart")
     if not humanoidRootPart then return false end
     
-    -- Filter out non-zombies in Camera folder
     if zombie.Parent.Name == "Camera" and zombie.Name ~= "m_Zombie" then
         return false
     end
@@ -86,94 +128,136 @@ local function isValidZombie(zombie)
     return true
 end
 
-local function getZombiesInRange()
-    local zombies = {}
+local function cacheZombies()
+    if tick() - lastUpdate < 0.5 and next(zombieCache) ~= nil then
+        return
+    end
     
-    if not rootPart then return zombies end
+    zombieCache = {}
     
     for _, zombie in ipairs(zombiesFolder:GetChildren()) do
         if isValidZombie(zombie) then
-            local zombieRoot = zombie.HumanoidRootPart
-            local distance = (zombieRoot.Position - rootPart.Position).Magnitude
+            local isPriority = zombie.Name == PRIORITY_ZOMBIE_NAME
+            local distance = 9999
             
-            if distance <= RANGE then
-                table.insert(zombies, {
-                    model = zombie,
-                    root = zombieRoot,
-                    distance = distance
-                })
+            if rootPart and zombie.HumanoidRootPart then
+                distance = (zombie.HumanoidRootPart.Position - rootPart.Position).Magnitude
+            end
+            
+            zombieCache[zombie] = {
+                model = zombie,
+                root = zombie.HumanoidRootPart,
+                distance = distance,
+                isPriority = isPriority,
+                lastSeen = tick()
+            }
+            
+            if isPriority then
+                createPriorityOutline(zombie)
             end
         end
     end
     
+    lastUpdate = tick()
+    cleanupOutlines()
+end
+
+local function getZombiesInRange()
+    local zombies = {}
+    local priorityZombies = {}
+    
+    if not rootPart then return zombies, priorityZombies end
+    
+    cacheZombies()
+    
+    for zombie, data in pairs(zombieCache) do
+        if zombie.Parent and data.root then
+            -- Update distance
+            data.distance = (data.root.Position - rootPart.Position).Magnitude
+            
+            if data.distance <= RANGE then
+                if data.isPriority then
+                    table.insert(priorityZombies, data)
+                else
+                    table.insert(zombies, data)
+                end
+            end
+        else
+            zombieCache[zombie] = nil
+        end
+    end
+    
     -- Sort by distance
+    table.sort(priorityZombies, function(a, b)
+        return a.distance < b.distance
+    end)
+    
     table.sort(zombies, function(a, b)
         return a.distance < b.distance
     end)
     
-    return zombies
+    return zombies, priorityZombies
 end
 
 -- FACE LOCKING
-local function faceClosestZombie(zombies)
-    if #zombies == 0 or not rootPart or humanoid and humanoid.Health <= 0 then
+local function faceTarget(targetPosition)
+    if not rootPart or (humanoid and humanoid.Health <= 0) then
         return
     end
     
-    local closestZombie = zombies[1]
-    if closestZombie then
-        -- Aggressive rotation to face zombie
-        local lookAtPosition = Vector3.new(
-            closestZombie.root.Position.X,
-            rootPart.Position.Y,
-            closestZombie.root.Position.Z
-        )
-        
-        -- Smooth rotation using CFrame
-        rootPart.CFrame = CFrame.new(
-            rootPart.Position,
-            lookAtPosition
-        )
+    local lookAtPosition = Vector3.new(
+        targetPosition.X,
+        rootPart.Position.Y,
+        targetPosition.Z
+    )
+    
+    rootPart.CFrame = CFrame.new(rootPart.Position, lookAtPosition)
+end
+
+local function faceClosestZombie(zombies, priorityZombies)
+    if #priorityZombies > 0 then
+        faceTarget(priorityZombies[1].root.Position)
+    elseif #zombies > 0 then
+        faceTarget(zombies[1].root.Position)
     end
 end
 
 -- ATTACK SYSTEM
-local function attackZombie(zombie)
+local function attackZombie(zombieData)
     if not weaponRemote or not rootPart then return false end
     
-    local head = zombie.model:FindFirstChild("Head")
+    local head = zombieData.model:FindFirstChild("Head")
     if not head then return false end
     
     local hitPos = head.Position
     local direction = (hitPos - rootPart.Position).Unit
     
     local success = pcall(function()
-        -- Swing weapon
         weaponRemote:FireServer("Swing", "Over")
-        
-        -- Gib remote
-        gibRemote:FireServer(zombie.model, "Head", hitPos, direction)
-        
-        -- Hit zombie
-        weaponRemote:FireServer("HitZombie", zombie.model, hitPos, false)
+        gibRemote:FireServer(zombieData.model, "Head", hitPos, direction)
+        weaponRemote:FireServer("HitZombie", zombieData.model, hitPos, false)
     end)
     
     return success
 end
 
-local function attackAllZombies(zombies)
-    if #zombies == 0 or not auraEnabled then return end
+local function attackAllZombies(zombies, priorityZombies)
+    if #zombies == 0 and #priorityZombies == 0 then return end
     
-    for _, zombie in ipairs(zombies) do
-        attackZombie(zombie)
-        -- No cooldown - immediate attacks
+    -- Attack priority zombies first
+    for _, zombieData in ipairs(priorityZombies) do
+        attackZombie(zombieData)
+    end
+    
+    -- Attack regular zombies
+    for _, zombieData in ipairs(zombies) do
+        attackZombie(zombieData)
     end
 end
 
 -- MAIN LOOP
 local function mainLoop()
     if not updateWeapon() then
-        warn("No weapon found. Searching...")
         return
     end
     
@@ -181,11 +265,11 @@ local function mainLoop()
         return
     end
     
-    local zombies = getZombiesInRange()
+    local zombies, priorityZombies = getZombiesInRange()
     
-    if #zombies > 0 then
-        faceClosestZombie(zombies)
-        attackAllZombies(zombies)
+    if #zombies > 0 or #priorityZombies > 0 then
+        faceClosestZombie(zombies, priorityZombies)
+        attackAllZombies(zombies, priorityZombies)
     end
 end
 
@@ -193,60 +277,65 @@ end
 UserInputService.InputBegan:Connect(function(input, processed)
     if not processed and input.KeyCode == KEYBIND then
         auraEnabled = not auraEnabled
+        
+        -- Clean outlines when disabled
+        if not auraEnabled then
+            for _, outline in pairs(priorityOutlines) do
+                outline:Destroy()
+            end
+            priorityOutlines = {}
+        end
+        
         print("[Kill Aura] " .. (auraEnabled and "ENABLED" or "DISABLED"))
+        print("[Kill Aura] Priority target: " .. PRIORITY_ZOMBIE_NAME)
     end
 end)
 
--- SETUP MONITORING
+-- SETUP
 monitorWeaponChanges()
 updateWeapon()
 
--- STATUS DISPLAY
-local function createStatusLabel()
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "AuraStatus"
-    screenGui.Parent = game:GetService("CoreGui")
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 150, 0, 40)
-    frame.Position = UDim2.new(0.5, -75, 0, 10)
-    frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    frame.BackgroundTransparency = 0.3
-    frame.BorderSizePixel = 0
-    frame.Parent = screenGui
-    
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = frame
-    
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, 0, 1, 0)
-    label.BackgroundTransparency = 1
-    label.Text = "Aura: OFF"
-    label.TextColor3 = Color3.fromRGB(255, 50, 50)
-    label.Font = Enum.Font.GothamBold
-    label.TextSize = 18
-    label.Parent = frame
-    
-    return label
+-- CONSOLE STATUS
+local statusConnection
+local function updateConsoleStatus()
+    if auraEnabled then
+        local zombies, priorityZombies = getZombiesInRange()
+        print(string.format(
+            "[Aura Active] Range: %d | Priority: %d/%d | Weapon: %s",
+            RANGE,
+            #priorityZombies,
+            #zombies + #priorityZombies,
+            equippedWeapon and equippedWeapon.Name or "None"
+        ))
+    end
 end
 
-local statusLabel = createStatusLabel()
-
--- UPDATE LOOP
+-- HEARTBEAT LOOP
 RunService.Heartbeat:Connect(function()
-    if statusLabel then
-        statusLabel.Text = "Aura: " .. (auraEnabled and "ON" or "OFF")
-        statusLabel.TextColor3 = auraEnabled and Color3.fromRGB(50, 255, 50) or Color3.fromRGB(255, 50, 50)
-    end
-    
     if auraEnabled then
         mainLoop()
+        
+        -- Update console every 2 seconds
+        if not statusConnection or tick() - lastUpdate >= 2 then
+            updateConsoleStatus()
+            lastUpdate = tick()
+        end
     end
 end)
 
--- INITIAL MESSAGE
-print("[Kill Aura] Loaded successfully!")
-print("[Kill Aura] Press " .. KEYBIND.Name .. " to toggle")
-print("[Kill Aura] Supported weapons: " .. table.concat(WEAPONS, ", "))
+-- CLEANUP ON GAME LEAVE
+game:BindToClose(function()
+    for _, outline in pairs(priorityOutlines) do
+        outline:Destroy()
+    end
+end)
+
+-- INITIALIZATION MESSAGE
+print("=======================================")
+print("[Kill Aura v2.0] Initialized")
+print("=======================================")
+print("Keybind: " .. KEYBIND.Name)
+print("Range: " .. RANGE .. " studs")
+print("Priority Target: " .. PRIORITY_ZOMBIE_NAME)
+print("Weapons: " .. table.concat(WEAPONS, ", "))
+print("=======================================")
