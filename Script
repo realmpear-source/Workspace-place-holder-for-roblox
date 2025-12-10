@@ -1,5 +1,5 @@
 -- CONFIGURATION
-local RANGE = 30
+local RANGE = 25
 local KEYBIND = Enum.KeyCode.X
 local WEAPONS = { "Sabre", "Axe" }
 local PRIORITY_ZOMBIE_NAME = "BarrelZombie"
