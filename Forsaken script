@@ -10,30 +10,22 @@ local ConnectionManager = {}
 ConnectionManager.__index = ConnectionManager
 
 function ConnectionManager.new()
-    return setmetatable({
-        _connections = {}
-    }, ConnectionManager)
+    return setmetatable({_connections = {}}, ConnectionManager)
 end
 
 function ConnectionManager:Add(connection)
-    if connection then
-        table.insert(self._connections, connection)
-    end
+    if connection then table.insert(self._connections, connection) end
     return connection
 end
 
 function ConnectionManager:DisconnectAll()
-    for _, connection in ipairs(self._connections) do
-        if typeof(connection) == "RBXScriptConnection" then
-            connection:Disconnect()
-        end
+    for _, conn in ipairs(self._connections) do
+        if typeof(conn) == "RBXScriptConnection" then conn:Disconnect() end
     end
     self._connections = {}
 end
 
-function ConnectionManager:Destroy()
-    self:DisconnectAll()
-end
+function ConnectionManager:Destroy() self:DisconnectAll() end
 
 -- ========== CONFIGURATION ==========
 local COLORS = {
@@ -85,251 +77,91 @@ local State = {
     currentGenerator = nil,
     highlightEnabled = true,
     lastHighlightUpdate = 0,
-    autoFixRunning = false
+    autoFixRunning = false,
+    IsEnabled = true,
+    lastPopupCheck = 0,
+    PopupCheckRate = 0.1
 }
-
--- ========== ERROR HANDLING ==========
-local ErrorHandler = {
-    errors = {},
-    maxErrors = 50
-}
-
-function ErrorHandler:Log(context, errorMsg, level)
-    level = level or "Warning"
-    local timestamp = os.date("%H:%M:%S")
-    local errorEntry = string.format("[%s][%s] %s: %s", timestamp, level, context, errorMsg)
-    
-    table.insert(self.errors, errorEntry)
-    
-    -- Keep only recent errors
-    if #self.errors > self.maxErrors then
-        table.remove(self.errors, 1)
-    end
-    
-    if level == "Error" then
-        warn(errorEntry)
-    end
-end
-
-function ErrorHandler:GetRecentErrors(count)
-    count = math.min(count or 5, #self.errors)
-    local result = {}
-    for i = #self.errors, #self.errors - count + 1, -1 do
-        if self.errors[i] then
-            table.insert(result, self.errors[i])
-        end
-    end
-    return result
-end
-
-local function safeCall(func, context, suppressError)
-    local success, result = pcall(func)
-    if not success then
-        ErrorHandler:Log(context or "Unknown", result, "Error")
-        if not suppressError then
-            warn(string.format("%s Error: %s", context or "Unknown", result))
-        end
-        return nil
-    end
-    return result
-end
 
 -- ========== UTILITY FUNCTIONS ==========
-local function waitForLocalPlayer(timeout)
-    if localPlayer then return true end
-    
-    local startTime = os.clock()
-    timeout = timeout or 10
-    
-    local success = safeCall(function()
-        local connection
-        local playerFound = false
-        
-        connection = Players:GetPropertyChangedSignal("LocalPlayer"):Connect(function()
-            if Players.LocalPlayer then
-                playerFound = true
-                localPlayer = Players.LocalPlayer
-                if connection then 
-                    connection:Disconnect() 
-                end
-            end
-        end)
-        
-        -- Also check immediately
-        if Players.LocalPlayer then
-            playerFound = true
-            localPlayer = Players.LocalPlayer
-        end
-        
-        while os.clock() - startTime < timeout and not playerFound do
-            task.wait(0.1)
-        end
-        
-        return playerFound
-    end, "waitForLocalPlayer")
-    
-    return success or false
+local function safeCall(func, context)
+    local success, result = pcall(func)
+    if not success then warn(string.format("[%s] Error: %s", context or "Unknown", result)) end
+    return success and result
 end
 
 local function isPlayerAlive()
     if State.characterDied then return false end
-    
     return safeCall(function()
         local character = localPlayer.Character
-        if not character then return false end
-        
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
         return humanoid and humanoid.Health > 0
-    end, "isPlayerAlive", true) or false
+    end, "isPlayerAlive") or false
 end
 
 local function getLocalPlayerRoot()
     return safeCall(function()
         local character = localPlayer.Character
         return character and character:FindFirstChild("HumanoidRootPart")
-    end, "getLocalPlayerRoot", true)
-end
-
-local function roundToNearest(number, nearest)
-    return safeCall(function()
-        return math.floor((number / nearest) + 0.5) * nearest
-    end, "roundToNearest", true) or number
+    end, "getLocalPlayerRoot")
 end
 
 local function isValidObject(obj)
     return safeCall(function()
-        return obj and (obj:IsA("Model") or obj:IsA("Part") or obj:IsA("BasePart"))
-    end, "isValidObject", true) or false
+        return obj and (obj:IsA("Model") or obj:IsA("BasePart"))
+    end, "isValidObject") or false
 end
 
 local function isLocalPlayerModel(model)
     if not model then return false end
-    
     return safeCall(function()
-        -- Check if this is the local player's character
-        if model == localPlayer.Character then
-            return true
-        end
-        
-        -- Check if this model belongs to the local player
+        if model == localPlayer.Character then return true end
         for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= localPlayer and player.Character == model then
-                return false  -- This is another player, not local
-            end
+            if player ~= localPlayer and player.Character == model then return false end
         end
-        
-        -- Check if it's in the Players folder but not the local player
-        local playersFolder = workspace:FindFirstChild("Players")
-        if playersFolder then
-            local survivors = playersFolder:FindFirstChild("Survivors")
-            local killers = playersFolder:FindFirstChild("Killers")
-            
-            -- Check Survivors folder
-            if survivors then
-                for _, survivor in ipairs(survivors:GetChildren()) do
-                    if survivor == model then
-                        -- Check if this is the local player's survivor model
-                        local isLocalSurvivor = false
-                        if localPlayer.Character and survivors:IsAncestorOf(localPlayer.Character) then
-                            -- Find which survivor model belongs to local player
-                            for _, child in ipairs(survivors:GetChildren()) do
-                                if child:IsAncestorOf(localPlayer.Character) or child == localPlayer.Character then
-                                    isLocalSurvivor = (child == model)
-                                    break
-                                end
-                            end
-                        end
-                        return isLocalSurvivor
-                    end
-                end
-            end
-            
-            -- Check Killers folder
-            if killers then
-                for _, killer in ipairs(killers:GetChildren()) do
-                    if killer == model then
-                        -- Check if this is the local player's killer model
-                        local isLocalKiller = false
-                        if localPlayer.Character and killers:IsAncestorOf(localPlayer.Character) then
-                            -- Find which killer model belongs to local player
-                            for _, child in ipairs(killers:GetChildren()) do
-                                if child:IsAncestorOf(localPlayer.Character) or child == localPlayer.Character then
-                                    isLocalKiller = (child == model)
-                                    break
-                                end
-                            end
-                        end
-                        return isLocalKiller
-                    end
-                end
-            end
-        end
-        
         return false
-    end, "isLocalPlayerModel", true) or false
+    end, "isLocalPlayerModel") or false
 end
 
 -- ========== BILLBOARD MANAGEMENT ==========
 local function cleanupBillboard(parent, billboardDict)
     safeCall(function()
         local billboard = billboardDict[parent]
-        if billboard and billboard.Parent then
-            billboard:Destroy()
-        end
+        if billboard and billboard.Parent then billboard:Destroy() end
         billboardDict[parent] = nil
-    end, "cleanupBillboard", true)
+    end, "cleanupBillboard")
 end
 
 local function clearAllBillboards()
     safeCall(function()
         for parent, billboard in pairs(State.playerBillboards) do
-            if billboard and billboard.Parent then
-                billboard:Destroy()
-            end
+            if billboard and billboard.Parent then billboard:Destroy() end
+            State.playerBillboards[parent] = nil
         end
         for parent, billboard in pairs(State.generatorBillboards) do
-            if billboard and billboard.Parent then
-                billboard:Destroy()
-            end
+            if billboard and billboard.Parent then billboard:Destroy() end
+            State.generatorBillboards[parent] = nil
         end
-        table.clear(State.playerBillboards)
-        table.clear(State.generatorBillboards)
-    end, "clearAllBillboards", true)
+    end, "clearAllBillboards")
 end
 
 local function createPlayerBillboard(parent, color, playerType)
-    -- Don't create billboard for local player
-    if isLocalPlayerModel(parent) then
-        return nil
-    end
-    
-    if not parent or not parent.Parent or State.playerBillboards[parent] then 
-        return nil 
-    end
+    if isLocalPlayerModel(parent) then return nil end
+    if not parent or not parent.Parent or State.playerBillboards[parent] then return nil end
     
     return safeCall(function()
-        -- Create BillboardGui attached to Torso or HumanoidRootPart
-        local attachTo = parent:FindFirstChild("HumanoidRootPart") or 
-                         parent:FindFirstChild("Torso") or 
-                         parent:FindFirstChild("UpperTorso")
-        
+        local attachTo = parent:FindFirstChild("HumanoidRootPart") or parent:FindFirstChild("Torso") or parent:FindFirstChild("UpperTorso")
         if not attachTo then return nil end
         
         local billboard = Instance.new("BillboardGui")
         billboard.Name = playerType .. "Distance"
         billboard.AlwaysOnTop = true
         billboard.Size = UDim2.new(0, 100, 0, 30)
-        billboard.StudsOffset = Vector3.new(0, -2.5, 0) -- Text below feet
-        billboard.MaxDistance = 100
+        billboard.StudsOffset = Vector3.new(0, -2.5, 0)
+        billboard.MaxDistance = 220
         billboard.Parent = attachTo
         
-        local frame = Instance.new("Frame")
-        frame.BackgroundTransparency = 1
-        frame.Size = UDim2.new(1, 0, 1, 0)
-        frame.Parent = billboard
-        
         local textLabel = Instance.new("TextLabel")
-        textLabel.Name = "DistanceText"
         textLabel.BackgroundTransparency = 1
         textLabel.Size = UDim2.new(1, 0, 1, 0)
         textLabel.Font = Enum.Font.SourceSansBold
@@ -338,117 +170,63 @@ local function createPlayerBillboard(parent, color, playerType)
         textLabel.TextStrokeTransparency = 0.7
         textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
         textLabel.Text = "Loading..."
-        textLabel.Parent = frame
+        textLabel.Parent = Instance.new("Frame", billboard)
         
         State.playerBillboards[parent] = billboard
         
-        -- Track attachment part changes
-        local function setupAttachmentTracking()
-            if not attachTo then return end
-            
-            local function cleanupOnParentChange()
-                if billboard and billboard.Parent then
-                    cleanupBillboard(parent, State.playerBillboards)
-                end
-            end
-            
-            -- Track when attachment part is removed
-            local attachmentConnection
-            attachmentConnection = attachTo.AncestryChanged:Connect(function(_, newParent)
-                if newParent == nil then
-                    cleanupOnParentChange()
-                    if attachmentConnection then
-                        attachmentConnection:Disconnect()
-                    end
-                end
-            end)
-            
-            -- Track when parent model is destroyed
-            parent.AncestryChanged:Connect(function(_, newParent)
-                if newParent == nil then
-                    cleanupOnParentChange()
-                end
-            end)
-        end
-        
-        setupAttachmentTracking()
+        attachTo.AncestryChanged:Connect(function(_, newParent)
+            if newParent == nil then cleanupBillboard(parent, State.playerBillboards) end
+        end)
         
         return billboard
     end, "createPlayerBillboard") or nil
 end
 
 local function createGeneratorBillboard(parent)
-    if not parent or not parent.Parent or State.generatorBillboards[parent] then 
-        return nil 
-    end
+    if not parent or not parent.Parent or State.generatorBillboards[parent] then return nil end
     
     return safeCall(function()
         local billboard = Instance.new("BillboardGui")
         billboard.Name = "GeneratorProgress"
         billboard.AlwaysOnTop = true
         billboard.Size = UDim2.new(0, 120, 0, 25)
-        billboard.StudsOffset = Vector3.new(0, -3.5, 0) -- Position below generator
+        billboard.StudsOffset = Vector3.new(0, -3.5, 0)
         billboard.MaxDistance = 75
         billboard.Parent = parent
         
-        local frame = Instance.new("Frame")
-        frame.BackgroundTransparency = 1
-        frame.Size = UDim2.new(1, 0, 1, 0)
-        frame.Parent = billboard
-        
         local textLabel = Instance.new("TextLabel")
-        textLabel.Name = "ProgressText"
         textLabel.BackgroundTransparency = 1
         textLabel.Size = UDim2.new(1, 0, 1, 0)
         textLabel.Font = Enum.Font.SourceSansBold
         textLabel.TextSize = 12
-        textLabel.TextColor3 = Color3.new(1, 1, 1) -- White text
+        textLabel.TextColor3 = Color3.new(1, 1, 1)
         textLabel.TextStrokeTransparency = 0.7
         textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
         textLabel.Text = "0%"
-        textLabel.Parent = frame
+        textLabel.Parent = Instance.new("Frame", billboard)
         
         State.generatorBillboards[parent] = billboard
         
-        -- Monitor progress changes
         local progress = parent:FindFirstChild("Progress")
         if progress then
-            local progressConnection
-            progressConnection = progress:GetPropertyChangedSignal("Value"):Connect(function()
+            State.highlightConnections:Add(progress:GetPropertyChangedSignal("Value"):Connect(function()
                 if progress.Value >= 100 then
-                    -- Clean up both highlight and billboard
-                    if State.highlightConnections then
-                        State.highlightConnections:Add(progressConnection)
-                    end
                     cleanupHighlight(parent)
-                    if progressConnection then
-                        progressConnection:Disconnect()
-                    end
-                else
-                    -- Update billboard text
-                    if textLabel and textLabel.Parent then
-                        textLabel.Text = string.format("Progress: %d%%", math.floor(progress.Value))
-                    end
+                elseif textLabel and textLabel.Parent then
+                    textLabel.Text = string.format("Progress: %d%%", math.floor(progress.Value))
                 end
-            end)
-            
-            if State.highlightConnections then
-                State.highlightConnections:Add(progressConnection)
-            end
+            end))
         end
         
-        -- Cleanup when generator is destroyed
         parent.AncestryChanged:Connect(function(_, newParent)
-            if newParent == nil then
-                cleanupBillboard(parent, State.generatorBillboards)
-            end
+            if newParent == nil then cleanupBillboard(parent, State.generatorBillboards) end
         end)
         
         return billboard
     end, "createGeneratorBillboard") or nil
 end
 
-local function updatePlayerBillboards()
+local function updateBillboards()
     if not State.highlightEnabled or not isPlayerAlive() then return end
     
     safeCall(function()
@@ -457,88 +235,48 @@ local function updatePlayerBillboards()
         
         for playerModel, billboard in pairs(State.playerBillboards) do
             if playerModel and playerModel.Parent and billboard and billboard.Parent then
-                -- Skip local player
                 if isLocalPlayerModel(playerModel) then
                     cleanupBillboard(playerModel, State.playerBillboards)
-                    continue
-                end
-                
-                local humanoidRoot = playerModel:FindFirstChild("HumanoidRootPart")
-                if humanoidRoot then
-                    local distance = (humanoidRoot.Position - localRoot.Position).Magnitude
-                    local roundedDistance = roundToNearest(distance, 1)
-                    
-                    local textLabel = billboard:FindFirstChild("Frame") and 
-                                     billboard.Frame:FindFirstChild("DistanceText")
-                    if textLabel then
-                        textLabel.Text = tostring(roundedDistance) .. " studs"
-                    end
                 else
-                    -- Player died or respawned, clean up billboard
-                    cleanupBillboard(playerModel, State.playerBillboards)
+                    local humanoidRoot = playerModel:FindFirstChild("HumanoidRootPart")
+                    if humanoidRoot then
+                        local distance = math.floor((humanoidRoot.Position - localRoot.Position).Magnitude + 0.5)
+                        local textLabel = billboard:FindFirstChild("Frame") and billboard.Frame:FindFirstChild("TextLabel")
+                        if textLabel then textLabel.Text = distance .. " studs" end
+                    else
+                        cleanupBillboard(playerModel, State.playerBillboards)
+                    end
                 end
             else
                 cleanupBillboard(playerModel, State.playerBillboards)
             end
         end
-    end, "updatePlayerBillboards", true)
-end
-
-local function updateGeneratorBillboards()
-    if not State.highlightEnabled then return end
-    
-    safeCall(function()
-        for generator, billboard in pairs(State.generatorBillboards) do
-            if generator and generator.Parent and billboard and billboard.Parent then
-                local progress = generator:FindFirstChild("Progress")
-                if progress then
-                    local textLabel = billboard:FindFirstChild("Frame") and 
-                                     billboard.Frame:FindFirstChild("ProgressText")
-                    if textLabel then
-                        if progress.Value >= 100 then
-                            -- Clean up both highlight and billboard
-                            cleanupHighlight(generator)
-                        else
-                            textLabel.Text = string.format("Progress: %d%%", math.floor(progress.Value))
-                        end
-                    end
-                end
-            else
-                cleanupBillboard(generator, State.generatorBillboards)
-            end
-        end
-    end, "updateGeneratorBillboards", true)
+    end, "updateBillboards")
 end
 
 -- ========== HIGHLIGHT MANAGEMENT ==========
 local function cleanupHighlight(parent)
     safeCall(function()
         local highlight = State.activeHighlights[parent]
-        if highlight and highlight.Parent then
-            highlight:Destroy()
-        end
+        if highlight and highlight.Parent then highlight:Destroy() end
         State.activeHighlights[parent] = nil
         cleanupBillboard(parent, State.playerBillboards)
         cleanupBillboard(parent, State.generatorBillboards)
-    end, "cleanupHighlight", true)
+    end, "cleanupHighlight")
 end
 
 local function clearAllHighlights()
     safeCall(function()
         for parent, highlight in pairs(State.activeHighlights) do
-            if highlight and highlight.Parent then
-                highlight:Destroy()
-            end
+            if highlight and highlight.Parent then highlight:Destroy() end
+            State.activeHighlights[parent] = nil
         end
-        table.clear(State.activeHighlights)
         clearAllBillboards()
-    end, "clearAllHighlights", true)
+    end, "clearAllHighlights")
 end
 
 local function createHighlight(parent, color)
-    if not parent or not parent.Parent or State.activeHighlights[parent] then 
-        return nil 
-    end
+    if not parent or not parent.Parent or State.activeHighlights[parent] then return nil end
     
     return safeCall(function()
         local highlight = Instance.new("Highlight")
@@ -549,56 +287,12 @@ local function createHighlight(parent, color)
         
         State.activeHighlights[parent] = highlight
         
-        -- Cleanup when parent is destroyed
         parent.AncestryChanged:Connect(function(_, newParent)
-            if newParent == nil then
-                cleanupHighlight(parent)
-            end
+            if newParent == nil then cleanupHighlight(parent) end
         end)
         
         return highlight
     end, "createHighlight") or nil
-end
-
--- ========== PLAYER TRACKING ==========
-local function setupCharacterTracking(character, playerType)
-    if not character or not character:IsA("Model") then return end
-    
-    safeCall(function()
-        -- Don't track local player
-        if isLocalPlayerModel(character) then
-            return
-        end
-        
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then return end
-        
-        -- Create billboard for player
-        if playerType == "survivor" then
-            createPlayerBillboard(character, COLORS.survivor, "Survivor")
-        elseif playerType == "killer" then
-            createPlayerBillboard(character, COLORS.killer, "Killer")
-        end
-        
-        -- Track health changes
-        humanoid.HealthChanged:Connect(function(health)
-            if health <= 0 then
-                cleanupHighlight(character)
-            end
-        end)
-        
-        -- Track death
-        humanoid.Died:Connect(function()
-            cleanupHighlight(character)
-        end)
-        
-        -- Track destruction
-        character.AncestryChanged:Connect(function(_, newParent)
-            if newParent == nil then
-                cleanupHighlight(character)
-            end
-        end)
-    end, "setupCharacterTracking", true)
 end
 
 -- ========== OBJECT SCANNERS ==========
@@ -606,20 +300,18 @@ local function processObjectCollection(names, color, conditionCheck)
     conditionCheck = conditionCheck or function() return true end
     
     safeCall(function()
-        -- Process existing objects
         for _, obj in ipairs(workspace:GetDescendants()) do
             if isValidObject(obj) and names[obj.Name] and conditionCheck(obj) then
                 createHighlight(obj, color)
             end
         end
         
-        -- Listen for new objects
         State.highlightConnections:Add(workspace.DescendantAdded:Connect(function(descendant)
             if isValidObject(descendant) and names[descendant.Name] and conditionCheck(descendant) then
                 createHighlight(descendant, color)
             end
         end))
-    end, "processObjectCollection", true)
+    end, "processObjectCollection")
 end
 
 local function highlightPlayers()
@@ -633,77 +325,23 @@ local function highlightPlayers()
             if not group then return end
             
             for _, playerModel in ipairs(group:GetChildren()) do
-                if playerModel:IsA("Model") then
-                    -- Don't highlight or create billboard for local player
-                    if isLocalPlayerModel(playerModel) then
-                        continue
-                    end
-                    
+                if playerModel:IsA("Model") and not isLocalPlayerModel(playerModel) then
                     createHighlight(playerModel, color)
-                    setupCharacterTracking(playerModel, playerType)
+                    createPlayerBillboard(playerModel, color, playerType)
                 end
             end
             
             State.highlightConnections:Add(group.ChildAdded:Connect(function(child)
-                if child:IsA("Model") then
-                    -- Don't highlight or create billboard for local player
-                    if isLocalPlayerModel(child) then
-                        return
-                    end
-                    
+                if child:IsA("Model") and not isLocalPlayerModel(child) then
                     createHighlight(child, color)
-                    setupCharacterTracking(child, playerType)
+                    createPlayerBillboard(child, color, playerType)
                 end
             end))
         end
         
-        processPlayerGroup(playersFolder:FindFirstChild("Survivors"), COLORS.survivor, "survivor")
-        processPlayerGroup(playersFolder:FindFirstChild("Killers"), COLORS.killer, "killer")
-    end, "highlightPlayers", true)
-end
-
-local function highlightItems()
-    if not ESP_SETTINGS.items then return end
-    
-    local itemMap = {}
-    for _, name in ipairs(OBJECT_NAMES.items) do
-        itemMap[name] = true
-    end
-    
-    processObjectCollection(itemMap, COLORS.item)
-end
-
-local function highlightMinions()
-    if not ESP_SETTINGS.minions then return end
-    
-    local minionMap = {}
-    for _, name in ipairs(OBJECT_NAMES.minions) do
-        minionMap[name] = true
-    end
-    
-    processObjectCollection(minionMap, COLORS.minion)
-end
-
-local function highlightSurvivorAbilities()
-    if not ESP_SETTINGS.survivorAbilities then return end
-    
-    local abilityMap = {}
-    for _, name in ipairs(OBJECT_NAMES.survivorAbilities) do
-        abilityMap[name] = true
-    end
-    
-    processObjectCollection(abilityMap, COLORS.survivorAbility)
-end
-
-local function highlightKillerAbilities()
-    if not ESP_SETTINGS.killerAbilities then return end
-    
-    local abilityMap = {}
-    for _, name in ipairs(OBJECT_NAMES.killerAbilities) do
-        abilityMap[name] = true
-    end
-    
-    processObjectCollection(abilityMap, COLORS.killerAbility)
+        processPlayerGroup(playersFolder:FindFirstChild("Survivors"), COLORS.survivor, "Survivor")
+        processPlayerGroup(playersFolder:FindFirstChild("Killers"), COLORS.killer, "Killer")
+    end, "highlightPlayers")
 end
 
 local function highlightGenerators()
@@ -713,67 +351,37 @@ local function highlightGenerators()
         local mapFolder = workspace:FindFirstChild("Map")
         local ingame = mapFolder and mapFolder:FindFirstChild("Ingame")
         local generators = ingame and ingame:FindFirstChild("Map")
-        
         if not generators then return end
         
-        local function isGeneratorValid(generator)
-            if not generator:IsA("Model") then return false end
-            local progress = generator:FindFirstChild("Progress")
+        local function isGeneratorValid(gen)
+            if not gen:IsA("Model") then return false end
+            local progress = gen:FindFirstChild("Progress")
             return progress and progress.Value < 100
         end
         
-        -- Process existing generators
         for _, gen in ipairs(generators:GetChildren()) do
             if gen.Name == "Generator" and isGeneratorValid(gen) then
                 createHighlight(gen, COLORS.generator)
                 createGeneratorBillboard(gen)
-                
-                -- Monitor progress changes for existing generators
-                local progress = gen:FindFirstChild("Progress")
-                if progress then
-                    local progressConnection
-                    progressConnection = progress:GetPropertyChangedSignal("Value"):Connect(function()
-                        if progress.Value >= 100 then
-                            cleanupHighlight(gen)
-                            if progressConnection then
-                                progressConnection:Disconnect()
-                            end
-                        end
-                    end)
-                    
-                    if State.highlightConnections then
-                        State.highlightConnections:Add(progressConnection)
-                    end
-                end
             end
         end
         
-        -- Listen for new generators
         State.highlightConnections:Add(generators.ChildAdded:Connect(function(child)
             if child.Name == "Generator" and isGeneratorValid(child) then
                 createHighlight(child, COLORS.generator)
                 createGeneratorBillboard(child)
-                
-                -- Monitor progress changes for new generators
-                local progress = child:FindFirstChild("Progress")
-                if progress then
-                    local progressConnection
-                    progressConnection = progress:GetPropertyChangedSignal("Value"):Connect(function()
-                        if progress.Value >= 100 then
-                            cleanupHighlight(child)
-                            if progressConnection then
-                                progressConnection:Disconnect()
-                            end
-                        end
-                    end)
-                    
-                    if State.highlightConnections then
-                        State.highlightConnections:Add(progressConnection)
-                    end
-                end
             end
         end))
-    end, "highlightGenerators", true)
+    end, "highlightGenerators")
+end
+
+local function highlightCategory(category, color, objectNames)
+    if not ESP_SETTINGS[category] then return end
+    
+    local nameMap = {}
+    for _, name in ipairs(objectNames) do nameMap[name] = true end
+    
+    processObjectCollection(nameMap, color)
 end
 
 -- ========== SCAN MANAGEMENT ==========
@@ -785,12 +393,12 @@ local function rescanHighlights()
         State.highlightConnections:DisconnectAll()
         
         highlightPlayers()
-        highlightItems()
-        highlightMinions()
-        highlightSurvivorAbilities()
-        highlightKillerAbilities()
         highlightGenerators()
-    end, "rescanHighlights", true)
+        highlightCategory("items", COLORS.item, OBJECT_NAMES.items)
+        highlightCategory("minions", COLORS.minion, OBJECT_NAMES.minions)
+        highlightCategory("survivorAbilities", COLORS.survivorAbility, OBJECT_NAMES.survivorAbilities)
+        highlightCategory("killerAbilities", COLORS.killerAbility, OBJECT_NAMES.killerAbilities)
+    end, "rescanHighlights")
 end
 
 local function toggleHighlights()
@@ -799,15 +407,11 @@ local function toggleHighlights()
     safeCall(function()
         if State.highlightEnabled then
             rescanHighlights()
-            -- Start billboard update loop
-            if State.billboardUpdateConnection then
-                State.billboardUpdateConnection:Disconnect()
-            end
+            if State.billboardUpdateConnection then State.billboardUpdateConnection:Disconnect() end
             State.billboardUpdateConnection = RunService.Heartbeat:Connect(function()
-                if os.clock() - State.lastHighlightUpdate > SETTINGS.BillboardUpdateRate then
-                    updatePlayerBillboards()
-                    updateGeneratorBillboards()
-                    State.lastHighlightUpdate = os.clock()
+                if tick() - State.lastHighlightUpdate > SETTINGS.BillboardUpdateRate then
+                    updateBillboards()
+                    State.lastHighlightUpdate = tick()
                 end
             end)
         else
@@ -818,22 +422,32 @@ local function toggleHighlights()
                 State.billboardUpdateConnection = nil
             end
         end
-    end, "toggleHighlights", true)
+    end, "toggleHighlights")
 end
 
-local function updateGeneratorHighlights()
-    if not State.highlightEnabled then return end
-    
-    safeCall(function()
-        for parent, highlight in pairs(State.activeHighlights) do
-            if parent and parent.Parent and parent.Name == "Generator" then
-                local progress = parent:FindFirstChild("Progress")
-                if progress and progress.Value >= 100 then
-                    cleanupHighlight(parent)
+-- ========== AUTO POPUP SYSTEM ==========
+local function handleAutoPopups()
+    while true do
+        if State.IsEnabled then
+            safeCall(function()
+                local playerGui = localPlayer:FindFirstChild("PlayerGui")
+                local temporaryUI = playerGui and playerGui:FindFirstChild("TemporaryUI")
+                
+                if temporaryUI then
+                    for _, popup in ipairs(temporaryUI:GetChildren()) do
+                        if popup.Name == "1x1x1x1Popup" then
+                            local centerX = popup.AbsolutePosition.X + (popup.AbsoluteSize.X / 2)
+                            local centerY = popup.AbsolutePosition.Y + (popup.AbsoluteSize.Y / 2) + 50
+                            
+                            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, playerGui, 1)
+                            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, playerGui, 1)
+                        end
+                    end
                 end
-            end
+            end, "handleAutoPopups")
         end
-    end, "updateGeneratorHighlights", true)
+        task.wait(State.PopupCheckRate)
+    end
 end
 
 -- ========== GENERATOR REPAIR SYSTEM ==========
@@ -846,7 +460,7 @@ local function validateGenerator(generator)
                generator.Main:FindFirstChild("Prompt") and
                generator:FindFirstChild("Remotes") and
                generator.Remotes:FindFirstChild("RE")
-    end, "validateGenerator", true) or false
+    end, "validateGenerator") or false
 end
 
 local function getClosestGenerator()
@@ -880,7 +494,7 @@ local function getClosestGenerator()
         end
         
         return closest
-    end, "getClosestGenerator", true)
+    end, "getClosestGenerator") or nil
 end
 
 local function attemptFixGenerator()
@@ -890,25 +504,17 @@ local function attemptFixGenerator()
     
     safeCall(function()
         local generator = getClosestGenerator()
-        
-        if not generator then
-            State.active = false
-            return
-        end
+        if not generator then return end
         
         State.currentGenerator = generator
         local prompt = generator.Main.Prompt
         
-        -- Activate prompt first
         for _ = 1, 3 do
             if not State.active or not isPlayerAlive() then break end
-            if prompt and prompt.Parent then
-                fireproximityprompt(prompt, 1)
-            end
+            if prompt and prompt.Parent then fireproximityprompt(prompt, 1) end
             task.wait(0.1)
         end
         
-        -- Attempt repairs
         for i = 1, SETTINGS.MaxAttempts do
             if not State.active or not isPlayerAlive() or not validateGenerator(generator) or generator.Progress.Value >= 100 then 
                 break 
@@ -920,7 +526,7 @@ local function attemptFixGenerator()
                 task.wait(SETTINGS.GenTime)
             end
         end
-    end, "attemptFixGenerator", true)
+    end, "attemptFixGenerator")
     
     State.active = false
     State.currentGenerator = nil
@@ -933,40 +539,14 @@ local function autoFixLoop()
     
     safeCall(function()
         while SETTINGS.AutoFix and State.autoFixRunning do
-            if not State.active and isPlayerAlive() then
-                local generator = getClosestGenerator()
-                if generator then
-                    attemptFixGenerator()
-                end
+            if not State.active and isPlayerAlive() and getClosestGenerator() then
+                attemptFixGenerator()
             end
             task.wait(SETTINGS.AutoFixDelay)
         end
-    end, "autoFixLoop", true)
+    end, "autoFixLoop")
     
     State.autoFixRunning = false
-end
-
--- ========== AUTO POPUP SYSTEM ==========
-local function handleAutoPopups()
-    while true do
-        safeCall(function()
-            local playerGui = localPlayer:FindFirstChild("PlayerGui")
-            local temporaryUI = playerGui and playerGui:FindFirstChild("TemporaryUI")
-            
-            if temporaryUI then
-                for _, popup in ipairs(temporaryUI:GetChildren()) do
-                    if popup:IsA("Frame") and popup.Name == "1x1x1x1Popup" then
-                        local centerX = popup.AbsolutePosition.X + (popup.AbsoluteSize.X / 2)
-                        local centerY = popup.AbsolutePosition.Y + (popup.AbsoluteSize.Y / 2) + 50
-                        
-                        VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, playerGui, 1)
-                        VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, playerGui, 1)
-                    end
-                end
-            end
-        end, "handleAutoPopups", true)
-        task.wait(0.1)
-    end
 end
 
 -- ========== EVENT HANDLERS ==========
@@ -982,36 +562,23 @@ local function onCharacterAdded(character)
     
     safeCall(function()
         local humanoid = character:WaitForChild("Humanoid", 5)
-        if humanoid then
-            humanoid.Died:Connect(onCharacterDeath)
-        end
+        if humanoid then humanoid.Died:Connect(onCharacterDeath) end
         
         task.wait(1)
-        
-        if State.highlightEnabled then
-            rescanHighlights()
-        end
-    end, "onCharacterAdded", true)
-end
-
-local function onPlayerDeathCleanup(playerModel)
-    cleanupHighlight(playerModel)
+        if State.highlightEnabled then rescanHighlights() end
+    end, "onCharacterAdded")
 end
 
 -- ========== INPUT HANDLING ==========
 local function setupInputHandlers()
-    -- Generator repair keybind
     if not SETTINGS.AutoFix then
         State.mainConnections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if gameProcessed or State.characterDied or SETTINGS.AutoFix then return end
-            
-            if input.KeyCode == SETTINGS.Keybind then
+            if not gameProcessed and input.KeyCode == SETTINGS.Keybind then
                 task.spawn(attemptFixGenerator)
             end
         end))
     end
     
-    -- Toggle highlights and billboards keybind
     State.mainConnections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if not gameProcessed and input.KeyCode == Enum.KeyCode.P then
             toggleHighlights()
@@ -1019,105 +586,41 @@ local function setupInputHandlers()
     end))
 end
 
--- ========== RESPAWN HANDLING ==========
-local function setupRespawnHandling()
-    -- Listen for player death in other players
-    local playersFolder = workspace:FindFirstChild("Players")
-    if playersFolder then
-        local function setupDeathTrackingForGroup(group)
-            if not group then return end
-            
-            for _, playerModel in ipairs(group:GetChildren()) do
-                if playerModel:IsA("Model") then
-                    -- Skip local player
-                    if isLocalPlayerModel(playerModel) then
-                        continue
-                    end
-                    
-                    local humanoid = playerModel:FindFirstChildOfClass("Humanoid")
-                    if humanoid then
-                        humanoid.Died:Connect(function()
-                            onPlayerDeathCleanup(playerModel)
-                        end)
-                    end
-                end
-            end
-            
-            group.ChildAdded:Connect(function(child)
-                if child:IsA("Model") then
-                    -- Skip local player
-                    if isLocalPlayerModel(child) then
-                        return
-                    end
-                    
-                    local humanoid = child:WaitForChild("Humanoid", 2)
-                    if humanoid then
-                        humanoid.Died:Connect(function()
-                            onPlayerDeathCleanup(child)
-                        end)
-                    end
-                end
-            end)
-        end
-        
-        setupDeathTrackingForGroup(playersFolder:FindFirstChild("Survivors"))
-        setupDeathTrackingForGroup(playersFolder:FindFirstChild("Killers"))
-    end
-end
-
 -- ========== INITIALIZATION ==========
 local function initialize()
-    if not waitForLocalPlayer() then
-        ErrorHandler:Log("Initialization", "Failed to get local player", "Error")
-        return false
+    if not localPlayer then
+        repeat task.wait(0.1) until localPlayer
     end
     
     safeCall(function()
-        -- Setup input handlers
         setupInputHandlers()
         
-        -- Setup character tracking
         if localPlayer.Character then
             local humanoid = localPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                humanoid.Died:Connect(onCharacterDeath)
-            end
+            if humanoid then humanoid.Died:Connect(onCharacterDeath) end
         end
         
         State.mainConnections:Add(localPlayer.CharacterAdded:Connect(onCharacterAdded))
         
-        -- Setup respawn handling for all players
-        setupRespawnHandling()
-        
-        -- Setup highlight updates
         State.mainConnections:Add(RunService.Heartbeat:Connect(function()
-            if State.highlightEnabled and os.clock() - State.lastHighlightUpdate > SETTINGS.HighlightRefreshRate then
-                updateGeneratorHighlights()
-                State.lastHighlightUpdate = os.clock()
+            if State.highlightEnabled and tick() - State.lastHighlightUpdate > SETTINGS.HighlightRefreshRate then
+                State.lastHighlightUpdate = tick()
             end
         end))
         
-        -- Start auto systems
-        if SETTINGS.AutoFix then
-            task.spawn(autoFixLoop)
-        end
+        if SETTINGS.AutoFix then task.spawn(autoFixLoop) end
         
         task.spawn(handleAutoPopups)
         
-        -- Initial highlight scan
         if State.highlightEnabled then
             rescanHighlights()
-            -- Start billboard update loop
             State.billboardUpdateConnection = RunService.Heartbeat:Connect(function()
-                if os.clock() - State.lastHighlightUpdate > SETTINGS.BillboardUpdateRate then
-                    updatePlayerBillboards()
-                    updateGeneratorBillboards()
-                    State.lastHighlightUpdate = os.clock()
+                if tick() - State.lastHighlightUpdate > SETTINGS.BillboardUpdateRate then
+                    updateBillboards()
+                    State.lastHighlightUpdate = tick()
                 end
             end)
         end
-        
-        ErrorHandler:Log("Initialization", "Script initialized successfully", "Info")
     end, "initialize")
     
     return true
@@ -1126,8 +629,8 @@ end
 local function cleanup()
     safeCall(function()
         State.active = false
-        State.currentGenerator = nil
         State.autoFixRunning = false
+        State.IsEnabled = false
         
         State.mainConnections:Destroy()
         State.highlightConnections:DisconnectAll()
@@ -1139,22 +642,11 @@ local function cleanup()
         
         clearAllHighlights()
         clearAllBillboards()
-        
-        ErrorHandler:Log("Cleanup", "Script cleaned up", "Info")
-    end, "cleanup", true)
+    end, "cleanup")
 end
 
 -- ========== MAIN EXECUTION ==========
-local success, err = pcall(function()
-    return initialize()
-end)
+local success = pcall(initialize)
+if not success then cleanup() end
 
-if not success then
-    ErrorHandler:Log("Main", "Critical initialization error: " .. tostring(err), "Error")
-    cleanup()
-end
-
--- Return cleanup function and error handler for debugging
-return function()
-    cleanup()
-end, ErrorHandler
+return cleanup
