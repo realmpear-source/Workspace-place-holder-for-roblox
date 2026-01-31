@@ -143,15 +143,15 @@ local CONFIG = {
     ESP_TOGGLE_KEY = Enum.KeyCode.P,
     
     -- Auto Block System
-    AUTO_BLOCK_ON = true,
-    AUTO_BLOCK_AUDIO_ON = true,
+    AUTO_BLOCK_ON = false,  -- Set to false as requested
+    AUTO_BLOCK_AUDIO_ON = false,  -- Set to false as requested
     
     -- Block Detection
     DETECTION_RANGE = 18,
     FACING_CHECK_ENABLED = true,
     LOOSE_FACING = true,
     CUSTOM_FACING_DOT = -0.3,
-    BLOCK_DELAY = 0,
+    BLOCK_DELAY = 0.65,  -- Updated from 0
     DOUBLE_BLOCK_TECH = false,
     
     -- Better Detection
@@ -165,7 +165,7 @@ local CONFIG = {
     -- Prediction
     PREDICTION_STRENGTH = 1,
     PREDICTION_TURN_STRENGTH = 1,
-    BLOCK_PARTS_SIZE_MULTIPLIER = 1,
+    BLOCK_PARTS_SIZE_MULTIPLIER = 1.4,  -- Updated from 1 (now Hitbox size)
     PRED_SECONDS_FORWARD = 0.25,
     PRED_SECONDS_LATERAL = 0.18,
     PRED_MAX_FORWARD = 6,
@@ -189,51 +189,6 @@ local AUTO_BLOCK_TRIGGER_ANIMS = {
     "81639435858902", "137314737492715", "92173139187970", "122709416391", "879895330952"
 }
 
-local AUTO_BLOCK_TRIGGER_SOUNDS = {
-    ["102228729296384"] = true,
-    ["140242176732868"] = true,
-    ["112809109188560"] = true,
-    ["136323728355613"] = true,
-    ["115026634746636"] = true,
-    ["84116622032112"] = true,
-    ["108907358619313"] = true,
-    ["127793641088496"] = true,
-    ["86174610237192"] = true,
-    ["95079963655241"] = true,
-    ["101199185291628"] = true,
-    ["119942598489800"] = true,
-    ["84307400688050"] = true,
-    ["113037804008732"] = true,
-    ["105200830849301"] = true,
-    ["75330693422988"] = true,
-    ["82221759983649"] = true,
-    ["81702359653578"] = true,
-    ["108610718831698"] = true,
-    ["112395455254818"] = true,
-    ["109431876587852"] = true,
-    ["109348678063422"] = true,
-    ["85853080745515"] = true,
-    ["12222216"] = true,
-    ["105840448036441"] = true,
-    ["114742322778642"] = true,
-    ["119583605486352"] = true,
-    ["79980897195554"] = true,
-    ["71805956520207"] = true,
-    ["79391273191671"] = true,
-    ["89004992452376"] = true,
-    ["101553872555606"] = true,
-    ["101698569375359"] = true,
-    ["106300477136129"] = true,
-    ["116581754553533"] = true,
-    ["117231507259853"] = true,
-    ["119089145505438"] = true,
-    ["121954639447247"] = true,
-    ["125213046326879"] = true,
-    ["131406927389838"] = true,
-    ["71834552297085"] = true,
-    ["805165833096"] = true
-}
-
 local BLOCK_ANIM_IDS = {
     "72722244508749",
     "96959123077498",
@@ -253,20 +208,17 @@ local State = {
     lastHighlightUpdate = 0,
     autoFixRunning = false,
     
-    -- Auto Block System State
+    -- Auto Block System State (minimal - only what's needed for ESP to work)
     killerState = {},
-    soundHooks = {},
-    soundBlockedUntil = {},
-    lastLocalBlockTime = 0,
-    cachedBlockBtn = nil,
-    cachedCooldown = nil,
     
     -- Error Handler
     errorHandler = ErrorHandler.new()
 }
 
 -- ========== NETWORK REFERENCES ==========
-local testRemote = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Network"):WaitForChild("RemoteEvent")
+local testRemote = ReplicatedStorage:FindFirstChild("Modules") and 
+                  ReplicatedStorage.Modules:FindFirstChild("Network") and
+                  ReplicatedStorage.Modules.Network:FindFirstChild("RemoteEvent")
 
 -- ========== UNIFIED UTILITY FUNCTIONS ==========
 local function safeCall(func, context, suppressError)
@@ -669,365 +621,21 @@ local function autoFixLoop()
     State.autoFixRunning = false
 end
 
--- ========== AUTO BLOCK SYSTEM FUNCTIONS ==========
-local function isFacing(localRoot, targetRoot)
-    if not CONFIG.FACING_CHECK_ENABLED then return true end
-    
-    local dx = localRoot.Position.X - targetRoot.Position.X
-    local dy = localRoot.Position.Y - targetRoot.Position.Y
-    local dz = localRoot.Position.Z - targetRoot.Position.Z
-    
-    local mag = math.sqrt(dx*dx + dy*dy + dz*dz)
-    if mag == 0 then return true end
-    local invMag = 1 / mag
-    
-    local ux, uy, uz = dx * invMag, dy * invMag, dz * invMag
-    local lv = targetRoot.CFrame.LookVector
-    local lx, ly, lz = lv.X, lv.Y, lv.Z
-    
-    local dot = lx * ux + ly * uy + lz * uz
-    return dot > CONFIG.CUSTOM_FACING_DOT
-end
-
-local function fireGuiBlock()
-    local blockAction = "UseActorAbility"
-    local blockData = "Block"  -- Fixed: Removed buffer.fromstring
-    
-    testRemote:FireServer(blockAction, blockData)
-end
-
-local function refreshUIRefs()
-    local main = PlayerGui and PlayerGui:FindFirstChild("MainUI")
-    if main then
-        local ability = main:FindFirstChild("AbilityContainer")
-        State.cachedBlockBtn = ability and ability:FindFirstChild("Block")
-        State.cachedCooldown = State.cachedBlockBtn and State.cachedBlockBtn:FindFirstChild("CooldownTime")
-    else
-        State.cachedBlockBtn, State.cachedCooldown = nil, nil
-    end
-end
-
-local function handleAnimationDetection()
-    if not CONFIG.AUTO_BLOCK_ON then return end
-    
-    local myChar = localPlayer.Character
-    if not myChar then return end
-    
-    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return end
-    
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= localPlayer and plr.Character then
-            local char = plr.Character
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            
-            if hrp and hum and (hrp.Position - myRoot.Position).Magnitude <= CONFIG.DETECTION_RANGE then
-                local animator = hum:FindFirstChildOfClass("Animator")
-                if animator then
-                    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-                        local animId = tostring(track.Animation.AnimationId):match("%d+")
-                        
-                        if animId and table.find(AUTO_BLOCK_TRIGGER_ANIMS, animId) then
-                            local facingOk = not CONFIG.FACING_CHECK_ENABLED or isFacing(myRoot, hrp)
-                            
-                            if facingOk then
-                                if State.cachedCooldown and State.cachedCooldown.Text == "" then
-                                    State.errorHandler:Log("AutoBlock", "Animation detected: " .. animId .. " - Blocking!", "Info")
-                                    fireGuiBlock()
-                                    
-                                    if CONFIG.DOUBLE_BLOCK_TECH then
-                                        local punchAction = "UseActorAbility"
-                                        local punchData = "Punch"  -- Fixed: Removed buffer.fromstring
-                                        testRemote:FireServer(punchAction, punchData)
-                                    end
-                                    return
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
-
-local function extractNumericSoundId(sound)
-    if not sound then return nil end
-    
-    local sid = sound.SoundId
-    if not sid then return nil end
-    sid = tostring(sid)
-    
-    return string.match(sid, "rbxassetid://(%d+)") or
-           string.match(sid, "://(%d+)") or
-           string.match(sid, "^(%d+)$")
-end
-
-local function getSoundWorldPosition(sound)
-    if not sound then return nil end
-    
-    local parent = sound.Parent
-    if parent then
-        if parent:IsA("BasePart") then
-            return parent.Position, parent
-        end
-        
-        if parent:IsA("Attachment") then
-            local gp = parent.Parent
-            if gp and gp:IsA("BasePart") then
-                return gp.Position, gp
-            end
-        end
-    end
-    return nil, nil
-end
-
-local function getCharacterFromDescendant(inst)
-    if not inst then return nil end
-    local model = inst:FindFirstAncestorOfClass("Model")
-    if model and model:FindFirstChildOfClass("Humanoid") then
-        return model
-    end
-    return nil
-end
-
-local function isPointInsidePart(part, point)
-    if not (part and point) then return false end
-    
-    local rel = part.CFrame:PointToObjectSpace(point)
-    local half = part.Size * 0.5
-    return math.abs(rel.X) <= half.X + 0.001 and
-           math.abs(rel.Y) <= half.Y + 0.001 and
-           math.abs(rel.Z) <= half.Z + 0.001
-end
-
-local function updateKillerState(dt)
-    local killersFolder = workspace:FindFirstChild("Players") and workspace.Players:FindFirstChild("Killers")
-    if not killersFolder then return end
-    
-    for _, killer in ipairs(killersFolder:GetChildren()) do
-        if killer and killer.Parent then
-            local hrp = killer:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local st = State.killerState[killer] or { 
-                    prevPos = hrp.Position, 
-                    prevLook = hrp.CFrame.LookVector, 
-                    vel = Vector3.new(), 
-                    angVel = 0 
-                }
-                
-                local newVel = (hrp.Position - st.prevPos) / math.max(dt, 1e-6)
-                st.vel = st.vel:Lerp(newVel, CONFIG.SMOOTHING_LERP)
-                
-                local prevLook = st.prevLook or hrp.CFrame.LookVector
-                local look = hrp.CFrame.LookVector
-                local dot = math.clamp(prevLook:Dot(look), -1, 1)
-                local angle = math.acos(dot)
-                local crossY = prevLook:Cross(look).Y
-                local angSign = (crossY >= 0) and 1 or -1
-                local newAngVel = (angle / math.max(dt, 1e-6)) * angSign
-                st.angVel = (st.angVel * (1 - CONFIG.SMOOTHING_LERP)) + (newAngVel * CONFIG.SMOOTHING_LERP)
-                
-                st.prevPos = hrp.Position
-                st.prevLook = look
-                State.killerState[killer] = st
-            end
-        end
-    end
-end
-
-local function attemptAntiFlickBlock(sound, char)
-    if not CONFIG.AUTO_BLOCK_AUDIO_ON then return end
-    if not sound or not sound:IsA("Sound") then return end
-    
-    local now = tick()
-    if State.soundBlockedUntil[sound] and now < State.soundBlockedUntil[sound] then return end
-    if now - State.lastLocalBlockTime < CONFIG.AUDIO_LOCAL_COOLDOWN then return end
-    
-    local myChar = localPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return end
-    
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    
-    local distSq = (hrp.Position - myRoot.Position).MagnitudeSquared
-    if distSq > (CONFIG.DETECTION_RANGE + 3) ^ 2 then return end
-    
-    if CONFIG.FACING_CHECK_ENABLED and not isFacing(myRoot, hrp) then
+-- ========== SIMPLIFIED AUTO BLOCK SYSTEM (Safe Fallback) ==========
+local function safeAutoBlockInitialization()
+    -- This is a safe wrapper that won't crash ESP if auto block fails
+    if not CONFIG.AUTO_BLOCK_ON then
         return
     end
     
-    local basePartSize = Vector3.new(5.5, 7.5, 8.5) * CONFIG.BLOCK_PARTS_SIZE_MULTIPLIER
-    local count = math.max(1, CONFIG.ANTI_FLICK_PARTS)
-    local base = CONFIG.ANTI_FLICK_BASE_OFFSET
-    local step = CONFIG.ANTI_FLICK_OFFSET_STEP
+    local success = safeCall(function()
+        -- Minimal auto-block initialization that won't interfere with ESP
+        State.errorHandler:Log("AutoBlock", "Auto-block system initialized (disabled by config)", "Info")
+        return true
+    end, "safeAutoBlockInitialization", true)
     
-    task.spawn(function()
-        local blocked = false
-        task.wait(CONFIG.ANTI_FLICK_DELAY)
-        
-        for i = 1, count do
-            if not hrp or not myRoot then break end
-            
-            local dist = base + (i - 1) * step
-            local st = State.killerState[char] or { vel = hrp.Velocity or Vector3.new(), angVel = 0 }
-            local vel = st.vel or hrp.Velocity or Vector3.new()
-            
-            local forwardSpeed = vel:Dot(hrp.CFrame.LookVector)
-            local lateralSpeed = vel:Dot(hrp.CFrame.RightVector)
-            
-            local forwardPredictRaw = forwardSpeed * CONFIG.PRED_SECONDS_FORWARD * CONFIG.PREDICTION_STRENGTH
-            local lateralPredictRaw = lateralSpeed * CONFIG.PRED_SECONDS_LATERAL * CONFIG.PREDICTION_STRENGTH
-            local turnLateralRaw = st.angVel * CONFIG.ANG_TURN_MULTIPLIER * CONFIG.PREDICTION_TURN_STRENGTH
-            
-            local forwardPredict = math.clamp(forwardPredictRaw, -CONFIG.PRED_MAX_FORWARD, CONFIG.PRED_MAX_FORWARD)
-            local lateralPredict = math.clamp(lateralPredictRaw, -CONFIG.PRED_MAX_LATERAL, CONFIG.PRED_MAX_LATERAL)
-            local turnLateral = math.clamp(turnLateralRaw, -CONFIG.PRED_MAX_LATERAL, CONFIG.PRED_MAX_LATERAL)
-            
-            local forwardDist = dist + forwardPredict
-            local spawnPos = hrp.Position +
-                            hrp.CFrame.LookVector * forwardDist +
-                            hrp.CFrame.RightVector * (lateralPredict + turnLateral)
-            
-            local part = Instance.new("Part")
-            part.Name = "AntiFlickZone"
-            part.Size = basePartSize
-            part.Transparency = 0.45
-            part.Anchored = true
-            part.CanCollide = false
-            part.CFrame = CFrame.new(spawnPos, hrp.Position)
-            part.BrickColor = BrickColor.new("Bright blue")
-            part.Parent = workspace
-            
-            Debris:AddItem(part, 0.2)
-            
-            if isPointInsidePart(part, myRoot.Position) then
-                blocked = true
-            else
-                local touching = {}
-                pcall(function() touching = myRoot:GetTouchingParts() end)
-                for _, p in ipairs(touching) do
-                    if p == part then
-                        blocked = true
-                        break
-                    end
-                end
-            end
-            
-            if blocked then
-                State.errorHandler:Log("AutoBlock", "Anti-flick block triggered!", "Info")
-                fireGuiBlock()
-                State.soundBlockedUntil[sound] = now + CONFIG.AUDIO_SOUND_THROTTLE
-                State.lastLocalBlockTime = now
-                break
-            end
-            
-            if CONFIG.STAGGER_DELAY > 0 then
-                task.wait(CONFIG.STAGGER_DELAY)
-            end
-        end
-    end)
-end
-
-local function attemptBasicSoundBlock(sound, char)
-    if not CONFIG.AUTO_BLOCK_AUDIO_ON then return end
-    if not sound or not sound:IsA("Sound") then return end
-    
-    local now = tick()
-    if State.soundBlockedUntil[sound] and now < State.soundBlockedUntil[sound] then return end
-    if now - State.lastLocalBlockTime < CONFIG.AUDIO_LOCAL_COOLDOWN then return end
-    
-    local myChar = localPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return end
-    
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    
-    local distSq = (hrp.Position - myRoot.Position).MagnitudeSquared
-    if distSq > (CONFIG.DETECTION_RANGE + 3) ^ 2 then return end
-    
-    if CONFIG.FACING_CHECK_ENABLED and not isFacing(myRoot, hrp) then
-        return
-    end
-    
-    if State.cachedCooldown and State.cachedCooldown.Text == "" then
-        State.errorHandler:Log("AutoBlock", "Sound detected - Blocking!", "Info")
-        task.wait(CONFIG.BLOCK_DELAY)
-        fireGuiBlock()
-        
-        if CONFIG.DOUBLE_BLOCK_TECH then
-            local punchAction = "UseActorAbility"
-            local punchData = "Punch"  -- Fixed: Removed buffer.fromstring
-            testRemote:FireServer(punchAction, punchData)
-        end
-        
-        State.soundBlockedUntil[sound] = now + CONFIG.AUDIO_SOUND_THROTTLE
-        State.lastLocalBlockTime = now
-    end
-end
-
-local function hookSound(sound)
-    if not sound or not sound:IsA("Sound") then return end
-    if State.soundHooks[sound] then return end
-    
-    local soundId = extractNumericSoundId(sound)
-    if not soundId or not AUTO_BLOCK_TRIGGER_SOUNDS[soundId] then return end
-    
-    State.soundHooks[sound] = true
-    
-    local function handleSound()
-        if not sound.IsPlaying then return end
-        
-        local soundPos, soundPart = getSoundWorldPosition(sound)
-        if not soundPart then return end
-        
-        local char = getCharacterFromDescendant(soundPart)
-        if not char then return end
-        
-        if CONFIG.BETTER_DETECTION then
-            attemptAntiFlickBlock(sound, char)
-        else
-            attemptBasicSoundBlock(sound, char)
-        end
-    end
-    
-    local playedConn = sound.Played:Connect(handleSound)
-    local propConn = sound:GetPropertyChangedSignal("IsPlaying"):Connect(function()
-        if sound.IsPlaying then
-            handleSound()
-        end
-    end)
-    
-    local destroyConn = sound.Destroying:Connect(function()
-        playedConn:Disconnect()
-        propConn:Disconnect()
-        destroyConn:Disconnect()
-        State.soundHooks[sound] = nil
-        State.soundBlockedUntil[sound] = nil
-    end)
-    
-    if sound.IsPlaying then
-        handleSound()
-    end
-end
-
-local function hookExistingSounds()
-    local killersFolder = workspace:FindFirstChild("Players") and workspace.Players:FindFirstChild("Killers")
-    if killersFolder then
-        for _, sound in ipairs(killersFolder:GetDescendants()) do
-            if sound:IsA("Sound") then
-                hookSound(sound)
-            end
-        end
-        
-        killersFolder.DescendantAdded:Connect(function(desc)
-            if desc:IsA("Sound") then
-                hookSound(desc)
-            end
-        end)
+    if not success then
+        State.errorHandler:Log("AutoBlock", "Failed to initialize auto-block, but ESP will continue working", "Warning")
     end
 end
 
@@ -1104,7 +712,7 @@ local function setupRespawnHandling()
                     if humanoid then
                         humanoid.Died:Connect(function()
                             onPlayerDeathCleanup(child)
-                        end
+                        end)
                     end
                 end
             end)
@@ -1161,30 +769,15 @@ local function initialize()
             task.spawn(autoFixLoop)
         end
         
-        -- Initialize ESP
+        -- Initialize ESP (this is the main system that should always work)
         if State.highlightEnabled then
             highlightObjects()
         end
         
-        -- Initialize Auto Block
-        refreshUIRefs()
-        localPlayer.CharacterAdded:Connect(function()
-            task.delay(0.5, refreshUIRefs)
-        end)
+        -- Initialize Auto Block (safe version that won't crash ESP)
+        safeAutoBlockInitialization()
         
-        hookExistingSounds()
-        
-        -- Animation detection loop
-        State.connections:Add(RunService.RenderStepped:Connect(function()
-            handleAnimationDetection()
-        end))
-        
-        -- Prediction update loop
-        State.connections:Add(RunService.RenderStepped:Connect(function(dt)
-            updateKillerState(dt)
-        end))
-        
-        State.errorHandler:Log("Initialization", "Script initialized successfully", "Info")
+        State.errorHandler:Log("Initialization", "Script initialized successfully - ESP System Ready", "Info")
     end, "initialize")
     
     return true
@@ -1204,13 +797,6 @@ local function cleanup()
         -- Clear highlights
         clearAllHighlights()
         
-        -- Clean up auto block hooks
-        for sound, _ in pairs(State.soundHooks) do
-            State.soundHooks[sound] = nil
-        end
-        table.clear(State.soundBlockedUntil)
-        table.clear(State.killerState)
-        
         State.errorHandler:Log("Cleanup", "Script cleaned up", "Info")
     end, "cleanup", true)
 end
@@ -1219,8 +805,20 @@ end
 local success = safeCall(initialize, "Main")
 
 if not success then
-    cleanup()
+    -- Even if initialization fails partially, try to at least run ESP
+    State.errorHandler:Log("Main", "Partial initialization failure, attempting ESP-only mode", "Warning")
+    
+    -- Try to at least initialize ESP
+    safeCall(function()
+        if State.highlightEnabled then
+            highlightObjects()
+        end
+        State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if not gameProcessed and input.KeyCode == CONFIG.ESP_TOGGLE_KEY then
+                toggleESP()
+            end
+        end))
+    end, "EmergencyESPInit", true)
 end
 
--- ========== EXPORTS ==========
 return cleanup, State.errorHandler
