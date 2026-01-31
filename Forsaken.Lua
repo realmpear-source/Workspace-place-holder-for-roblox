@@ -5,7 +5,6 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 local localPlayer = Players.LocalPlayer
-local PlayerGui = localPlayer:WaitForChild("PlayerGui")
 
 -- ========== CONNECTION MANAGER ==========
 local ConnectionManager = {}
@@ -143,43 +142,17 @@ local CONFIG = {
     ESP_TOGGLE_KEY = Enum.KeyCode.P,
     
     -- Auto Block System
-    AUTO_BLOCK_ON = false,  -- Set to false as requested
-    AUTO_BLOCK_AUDIO_ON = false,  -- Set to false as requested
+    AUTO_BLOCK_ENABLED = true,
+    AUTO_BLOCK_TOGGLE_KEY = Enum.KeyCode.O,
     
     -- Block Detection
-    DETECTION_RANGE = 18,
-    FACING_CHECK_ENABLED = true,
-    LOOSE_FACING = true,
-    CUSTOM_FACING_DOT = -0.3,
-    BLOCK_DELAY = 0.65,  -- Updated from 0
-    DOUBLE_BLOCK_TECH = false,
-    
-    -- Better Detection
-    BETTER_DETECTION = false,
-    ANTI_FLICK_PARTS = 4,
-    ANTI_FLICK_DELAY = 0,
-    ANTI_FLICK_BASE_OFFSET = 2.7,
-    ANTI_FLICK_OFFSET_STEP = 0,
-    STAGGER_DELAY = 0.02,
-    
-    -- Prediction
-    PREDICTION_STRENGTH = 1,
-    PREDICTION_TURN_STRENGTH = 1,
-    BLOCK_PARTS_SIZE_MULTIPLIER = 1.4,  -- Updated from 1 (now Hitbox size)
-    PRED_SECONDS_FORWARD = 0.25,
-    PRED_SECONDS_LATERAL = 0.18,
-    PRED_MAX_FORWARD = 6,
-    PRED_MAX_LATERAL = 4,
-    ANG_TURN_MULTIPLIER = 0.6,
-    SMOOTHING_LERP = 0.22,
-    
-    -- Sound Throttle
-    AUDIO_LOCAL_COOLDOWN = 0.35,
-    AUDIO_SOUND_THROTTLE = 1.0,
-    AUDIO_PREDICT_DT = 0.08
+    DETECTION_RANGE = 1,
+    BLOCK_DELAY = 0.65,
+    HITBOX_SIZE = 1.4,
+    HITBOX_TRANSPARENCY = 0.5
 }
 
--- ========== AUTO BLOCK DATA ==========
+-- ========== AUTO BLOCK ANIMATION TRIGGERS ==========
 local AUTO_BLOCK_TRIGGER_ANIMS = {
     "126830014841198", "126355327951215", "121086746534252", "18885909645",
     "98456918873918", "105458270463374", "83829782357897", "125403313786645",
@@ -187,12 +160,6 @@ local AUTO_BLOCK_TRIGGER_ANIMS = {
     "97167027849946", "109230267448394", "139835501033932", "126896426760253",
     "109667959938617", "126681776859538", "129976080405072", "121293883585738",
     "81639435858902", "137314737492715", "92173139187970", "122709416391", "879895330952"
-}
-
-local BLOCK_ANIM_IDS = {
-    "72722244508749",
-    "96959123077498",
-    "95802026624883"
 }
 
 -- ========== UNIFIED STATE MANAGEMENT ==========
@@ -208,8 +175,9 @@ local State = {
     lastHighlightUpdate = 0,
     autoFixRunning = false,
     
-    -- Auto Block System State (minimal - only what's needed for ESP to work)
-    killerState = {},
+    -- Auto Block System State
+    autoBlockEnabled = CONFIG.AUTO_BLOCK_ENABLED,
+    lastBlockTime = 0,
     
     -- Error Handler
     errorHandler = ErrorHandler.new()
@@ -217,8 +185,8 @@ local State = {
 
 -- ========== NETWORK REFERENCES ==========
 local testRemote = ReplicatedStorage:FindFirstChild("Modules") and 
-                  ReplicatedStorage.Modules:FindFirstChild("Network") and
-                  ReplicatedStorage.Modules.Network:FindFirstChild("RemoteEvent")
+                   ReplicatedStorage.Modules:FindFirstChild("Network") and
+                   ReplicatedStorage.Modules.Network:FindFirstChild("RemoteEvent")
 
 -- ========== UNIFIED UTILITY FUNCTIONS ==========
 local function safeCall(func, context, suppressError)
@@ -621,22 +589,97 @@ local function autoFixLoop()
     State.autoFixRunning = false
 end
 
--- ========== SIMPLIFIED AUTO BLOCK SYSTEM (Safe Fallback) ==========
-local function safeAutoBlockInitialization()
-    -- This is a safe wrapper that won't crash ESP if auto block fails
-    if not CONFIG.AUTO_BLOCK_ON then
-        return
-    end
+-- ========== AUTO BLOCK SYSTEM FUNCTIONS ==========
+local function fireGuiBlock()
+    if not testRemote then return false end
     
-    local success = safeCall(function()
-        -- Minimal auto-block initialization that won't interfere with ESP
-        State.errorHandler:Log("AutoBlock", "Auto-block system initialized (disabled by config)", "Info")
+    return safeCall(function()
+        local blockAction = "UseActorAbility"
+        local blockData = {buffer.fromstring("\"Block\"")}
+        
+        testRemote:FireServer(blockAction, blockData)
         return true
-    end, "safeAutoBlockInitialization", true)
+    end, "fireGuiBlock", true) or false
+end
+
+local function createHitbox(character, targetCharacter)
+    if not character or not targetCharacter then return nil end
     
-    if not success then
-        State.errorHandler:Log("AutoBlock", "Failed to initialize auto-block, but ESP will continue working", "Warning")
-    end
+    return safeCall(function()
+        local hrp = targetCharacter:FindFirstChild("HumanoidRootPart")
+        local myRoot = character:FindFirstChild("HumanoidRootPart")
+        
+        if not hrp or not myRoot then return nil end
+        
+        local part = Instance.new("Part")
+        part.Name = "AutoBlockHitbox"
+        part.Size = Vector3.new(CONFIG.HITBOX_SIZE, CONFIG.HITBOX_SIZE, CONFIG.HITBOX_SIZE)
+        part.Transparency = CONFIG.HITBOX_TRANSPARENCY
+        part.Anchored = true
+        part.CanCollide = false
+        part.CFrame = CFrame.new(hrp.Position + hrp.CFrame.LookVector * 3)
+        part.BrickColor = BrickColor.new("Bright red")
+        part.Parent = workspace
+        
+        Debris:AddItem(part, 0.5)
+        
+        -- Check if player is inside hitbox
+        local distance = (myRoot.Position - part.Position).Magnitude
+        local hitboxRadius = CONFIG.HITBOX_SIZE / 2
+        
+        return distance <= hitboxRadius, part
+    end, "createHitbox", true)
+end
+
+local function handleAnimationDetection()
+    if not State.autoBlockEnabled or not CONFIG.AUTO_BLOCK_ENABLED then return end
+    
+    return safeCall(function()
+        local myChar = localPlayer.Character
+        if not myChar then return end
+        
+        local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+        
+        local now = tick()
+        if now - State.lastBlockTime < CONFIG.BLOCK_DELAY then return end
+        
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= localPlayer and plr.Character then
+                local char = plr.Character
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                
+                if hrp and hum and (hrp.Position - myRoot.Position).Magnitude <= CONFIG.DETECTION_RANGE then
+                    local animator = hum:FindFirstChildOfClass("Animator")
+                    if animator then
+                        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                            local animId = tostring(track.Animation.AnimationId):match("%d+")
+                            
+                            if animId and table.find(AUTO_BLOCK_TRIGGER_ANIMS, animId) then
+                                -- Create hitbox and check if player is inside
+                                local hitResult, hitbox = createHitbox(myChar, char)
+                                
+                                if hitResult then
+                                    State.errorHandler:Log("AutoBlock", "Attack detected: " .. animId .. " - Blocking!", "Info")
+                                    if fireGuiBlock() then
+                                        State.lastBlockTime = now
+                                    end
+                                    return true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end, "handleAnimationDetection", true) or false
+end
+
+local function toggleAutoBlock()
+    State.autoBlockEnabled = not State.autoBlockEnabled
+    State.errorHandler:Log("AutoBlock", "Auto Block: " .. (State.autoBlockEnabled and "ENABLED" or "DISABLED"), "Info")
 end
 
 -- ========== EVENT HANDLERS ==========
@@ -674,6 +717,13 @@ local function setupInputHandlers()
     State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if not gameProcessed and input.KeyCode == CONFIG.ESP_TOGGLE_KEY then
             toggleESP()
+        end
+    end))
+    
+    -- Auto Block Toggle
+    State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if not gameProcessed and input.KeyCode == CONFIG.AUTO_BLOCK_TOGGLE_KEY then
+            toggleAutoBlock()
         end
     end))
     
@@ -769,15 +819,23 @@ local function initialize()
             task.spawn(autoFixLoop)
         end
         
-        -- Initialize ESP (this is the main system that should always work)
+        -- Initialize ESP
         if State.highlightEnabled then
             highlightObjects()
         end
         
-        -- Initialize Auto Block (safe version that won't crash ESP)
-        safeAutoBlockInitialization()
+        -- Animation detection loop (with error protection)
+        State.connections:Add(RunService.RenderStepped:Connect(function()
+            local success = pcall(handleAnimationDetection)
+            if not success then
+                -- If auto block fails, ESP continues working
+                State.errorHandler:Log("AutoBlock", "Error in animation detection, continuing with ESP only", "Warning", true)
+            end
+        end))
         
-        State.errorHandler:Log("Initialization", "Script initialized successfully - ESP System Ready", "Info")
+        State.errorHandler:Log("Initialization", "Script initialized successfully", "Info")
+        State.errorHandler:Log("AutoBlock", "Auto Block: " .. (State.autoBlockEnabled and "ENABLED" or "DISABLED"), "Info")
+        State.errorHandler:Log("ESP", "ESP: " .. (State.highlightEnabled and "ENABLED" or "DISABLED"), "Info")
     end, "initialize")
     
     return true
@@ -797,6 +855,13 @@ local function cleanup()
         -- Clear highlights
         clearAllHighlights()
         
+        -- Clean up auto block hitboxes
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj.Name == "AutoBlockHitbox" then
+                obj:Destroy()
+            end
+        end
+        
         State.errorHandler:Log("Cleanup", "Script cleaned up", "Info")
     end, "cleanup", true)
 end
@@ -805,20 +870,7 @@ end
 local success = safeCall(initialize, "Main")
 
 if not success then
-    -- Even if initialization fails partially, try to at least run ESP
-    State.errorHandler:Log("Main", "Partial initialization failure, attempting ESP-only mode", "Warning")
-    
-    -- Try to at least initialize ESP
-    safeCall(function()
-        if State.highlightEnabled then
-            highlightObjects()
-        end
-        State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if not gameProcessed and input.KeyCode == CONFIG.ESP_TOGGLE_KEY then
-                toggleESP()
-            end
-        end))
-    end, "EmergencyESPInit", true)
+    cleanup()
 end
 
 return cleanup, State.errorHandler
