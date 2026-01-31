@@ -37,21 +37,16 @@ function ConnectionManager:Destroy()
 end
 
 -- ========== ERROR HANDLER ==========
-local ErrorHandler = {
-    errors = {},
-    maxErrors = 50,
-    enabled = true,
-    logToConsole = true
-}
+local ErrorHandler = {}
+ErrorHandler.__index = ErrorHandler
 
 function ErrorHandler.new()
-    local self = setmetatable({
+    return setmetatable({
         errors = {},
         maxErrors = 50,
         enabled = true,
         logToConsole = true
     }, ErrorHandler)
-    return self
 end
 
 function ErrorHandler:Log(context, errorMsg, level, suppressOutput)
@@ -59,7 +54,7 @@ function ErrorHandler:Log(context, errorMsg, level, suppressOutput)
     
     level = level or "Warning"
     local timestamp = os.date("%H:%M:%S")
-    local errorEntry = string.format("[%s][%s] %s: %s", timestamp, level, context, errorMsg)
+    local errorEntry = string.format("[%s][%s] %s: %s", timestamp, level, context, tostring(errorMsg))
     
     table.insert(self.errors, errorEntry)
     
@@ -167,8 +162,6 @@ local AUTO_BLOCK_TRIGGER_ANIMS = {
 local State = {
     -- ESP System State
     activeHighlights = setmetatable({}, {__mode = "v"}),
-    connections = ConnectionManager.new(),
-    highlightConnections = ConnectionManager.new(),
     characterDied = false,
     espActive = false,
     currentGenerator = nil,
@@ -178,27 +171,38 @@ local State = {
     
     -- Auto Block System State
     autoBlockEnabled = CONFIG.AUTO_BLOCK_ENABLED,
-    lastBlockTime = 0
+    lastBlockTime = 0,
+    
+    -- Managers
+    connections = ConnectionManager.new(),
+    highlightConnections = ConnectionManager.new(),
+    errorHandler = nil  -- Will be initialized later
 }
-
--- Create error handler instance
-local errorHandler = ErrorHandler.new()
 
 -- ========== NETWORK REFERENCES ==========
 local testRemote = ReplicatedStorage:FindFirstChild("Modules") and 
                    ReplicatedStorage.Modules:FindFirstChild("Network") and
                    ReplicatedStorage.Modules.Network:FindFirstChild("RemoteEvent")
 
--- ========== UNIFIED UTILITY FUNCTIONS ==========
+-- ========== GLOBAL ERROR HANDLER ==========
 local function safeCall(func, context, suppressError)
     local success, result = pcall(func)
     if not success then
-        errorHandler:Log(context or "Unknown", result, "Error", suppressError)
+        -- Use global print if errorHandler is not available yet
+        if State.errorHandler then
+            State.errorHandler:Log(context or "Unknown", result, "Error", suppressError)
+        else
+            local errorMsg = string.format("[%s][Error] %s: %s", os.date("%H:%M:%S"), context or "Unknown", tostring(result))
+            if not suppressError then
+                print(errorMsg)
+            end
+        end
         return nil
     end
     return result
 end
 
+-- ========== UNIFIED UTILITY FUNCTIONS ==========
 local function waitForLocalPlayer(timeout)
     if localPlayer then return true end
     
@@ -479,7 +483,6 @@ local function toggleESP()
             clearAllHighlights()
             State.highlightConnections:DisconnectAll()
         end
-        errorHandler:Log("ESP", "ESP: " .. (State.highlightEnabled and "ENABLED" or "DISABLED"), "Info")
     end, "toggleESP", true)
 end
 
@@ -593,10 +596,7 @@ end
 
 -- ========== AUTO BLOCK SYSTEM FUNCTIONS ==========
 local function fireGuiBlock()
-    if not testRemote then 
-        errorHandler:Log("AutoBlock", "RemoteEvent not found", "Warning", true)
-        return false 
-    end
+    if not testRemote then return false end
     
     return safeCall(function()
         local blockAction = "UseActorAbility"
@@ -666,7 +666,9 @@ local function handleAnimationDetection()
                                 local hitResult, hitbox = createHitbox(myChar, char)
                                 
                                 if hitResult then
-                                    errorHandler:Log("AutoBlock", "Attack detected: " .. animId .. " - Blocking!", "Info")
+                                    if State.errorHandler then
+                                        State.errorHandler:Log("AutoBlock", "Attack detected: " .. animId .. " - Blocking!", "Info")
+                                    end
                                     if fireGuiBlock() then
                                         State.lastBlockTime = now
                                     end
@@ -684,7 +686,9 @@ end
 
 local function toggleAutoBlock()
     State.autoBlockEnabled = not State.autoBlockEnabled
-    errorHandler:Log("AutoBlock", "Auto Block: " .. (State.autoBlockEnabled and "ENABLED" or "DISABLED"), "Info")
+    if State.errorHandler then
+        State.errorHandler:Log("AutoBlock", "Auto Block: " .. (State.autoBlockEnabled and "ENABLED" or "DISABLED"), "Info")
+    end
 end
 
 -- ========== EVENT HANDLERS ==========
@@ -780,8 +784,11 @@ end
 
 -- ========== INITIALIZATION ==========
 local function initialize()
+    -- Initialize ErrorHandler FIRST before any safeCall uses it
+    State.errorHandler = ErrorHandler.new()
+    
     if not waitForLocalPlayer() then
-        errorHandler:Log("Initialization", "Failed to get local player", "Error")
+        State.errorHandler:Log("Initialization", "Failed to get local player", "Error")
         return false
     end
     
@@ -834,13 +841,13 @@ local function initialize()
             local success = pcall(handleAnimationDetection)
             if not success then
                 -- If auto block fails, ESP continues working
-                errorHandler:Log("AutoBlock", "Error in animation detection, continuing with ESP only", "Warning", true)
+                State.errorHandler:Log("AutoBlock", "Error in animation detection, continuing with ESP only", "Warning", true)
             end
         end))
         
-        errorHandler:Log("Initialization", "Script initialized successfully", "Info")
-        errorHandler:Log("AutoBlock", "Auto Block: " .. (State.autoBlockEnabled and "ENABLED" or "DISABLED"), "Info")
-        errorHandler:Log("ESP", "ESP: " .. (State.highlightEnabled and "ENABLED" or "DISABLED"), "Info")
+        State.errorHandler:Log("Initialization", "Script initialized successfully", "Info")
+        State.errorHandler:Log("AutoBlock", "Auto Block: " .. (State.autoBlockEnabled and "ENABLED" or "DISABLED"), "Info")
+        State.errorHandler:Log("ESP", "ESP: " .. (State.highlightEnabled and "ENABLED" or "DISABLED"), "Info")
     end, "initialize")
     
     return true
@@ -867,7 +874,9 @@ local function cleanup()
             end
         end
         
-        errorHandler:Log("Cleanup", "Script cleaned up", "Info")
+        if State.errorHandler then
+            State.errorHandler:Log("Cleanup", "Script cleaned up", "Info")
+        end
     end, "cleanup", true)
 end
 
@@ -878,4 +887,4 @@ if not success then
     cleanup()
 end
 
-return cleanup, errorHandler
+return cleanup, State.errorHandler
