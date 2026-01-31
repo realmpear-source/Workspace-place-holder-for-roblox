@@ -691,7 +691,7 @@ end
 
 local function fireGuiBlock()
     local blockAction = "UseActorAbility"
-    local blockData = {buffer.fromstring("\"Block\"")}
+    local blockData = "Block"  -- Fixed: Removed buffer.fromstring
     
     testRemote:FireServer(blockAction, blockData)
 end
@@ -738,7 +738,7 @@ local function handleAnimationDetection()
                                     
                                     if CONFIG.DOUBLE_BLOCK_TECH then
                                         local punchAction = "UseActorAbility"
-                                        local punchData = {buffer.fromstring("\"Punch\"")}
+                                        local punchData = "Punch"  -- Fixed: Removed buffer.fromstring
                                         testRemote:FireServer(punchAction, punchData)
                                     end
                                     return
@@ -960,7 +960,7 @@ local function attemptBasicSoundBlock(sound, char)
         
         if CONFIG.DOUBLE_BLOCK_TECH then
             local punchAction = "UseActorAbility"
-            local punchData = {buffer.fromstring("\"Punch\"")}
+            local punchData = "Punch"  -- Fixed: Removed buffer.fromstring
             testRemote:FireServer(punchAction, punchData)
         end
         
@@ -1222,4 +1222,5 @@ if not success then
     cleanup()
 end
 
+-- ========== EXPORTS ==========
 return cleanup, State.errorHandler
