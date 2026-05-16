@@ -8,10 +8,10 @@ local Workspace = game:GetService("Workspace")
 local localPlayer = Players.LocalPlayer
 
 -- ========== DUPLICATE-RUN GUARD ==========
-if _G.GBHubInstance then
-    _G.GBHubInstance.cleanup()
+if _G.GBHubScriptInstance then
+    _G.GBHubScriptInstance.cleanup()
 end
-_G.GBHubInstance = nil
+_G.GBHubScriptInstance = nil
 
 -- ========== CONNECTION MANAGER ==========
 local ConnectionManager = {}
@@ -47,625 +47,904 @@ ErrorHandler.__index = ErrorHandler
 
 function ErrorHandler.new()
     return setmetatable({
-        errors      = {},
-        maxErrors   = 50,
-        enabled     = true,
-        logToConsole = true,
+        errors = {},
+        maxErrors = 50,
+        enabled = true,
+        logToConsole = true
     }, ErrorHandler)
 end
 
 function ErrorHandler:Log(context, errorMsg, level, suppressOutput)
     if not self.enabled then return end
+
     level = level or "Warning"
     local timestamp = os.date("%H:%M:%S")
     local entry = {
-        context  = context,
+        context = context,
         errorMsg = errorMsg,
         traceback = errorMsg,
-        level    = level,
-        timestamp = timestamp,
+        level = level,
+        timestamp = timestamp
     }
+
     table.insert(self.errors, entry)
     if #self.errors > self.maxErrors then
         table.remove(self.errors, 1)
     end
+
     if self.logToConsole and not suppressOutput then
         print(string.format("[%s][%s] %s: %s", timestamp, level, context, errorMsg))
     end
+
     return entry
 end
 
-function ErrorHandler:Clear()  self.errors  = {} end
+function ErrorHandler:Clear()
+    self.errors = {}
+end
+
+function ErrorHandler:GetRecent(count)
+    count = math.min(count or 5, #self.errors)
+    local result = {}
+    for i = #self.errors, #self.errors - count + 1, -1 do
+        local entry = self.errors[i]
+        if entry then
+            table.insert(result, string.format("[%s][%s] %s: %s",
+                entry.timestamp, entry.level, entry.context, entry.errorMsg))
+        end
+    end
+    return result
+end
+
 function ErrorHandler:Enable() self.enabled = true end
 function ErrorHandler:Disable() self.enabled = false end
+function ErrorHandler:SetConsoleLogging(enabled) self.logToConsole = enabled end
 
 -- ========== CONFIGURATION ==========
-local CONFIG = {
-    KillAura = {
-        Keybind        = Enum.KeyCode.F1,
-        Range          = 16,
-        Cooldown       = 0.1,
-        WeaponPatterns = { "%a+Axe", "Spade", "Spontoon", "Lance", "%a+Sabre", "Stake" },
-    },
-    PlayerESP = {
-        Keybind           = Enum.KeyCode.F2,
-        MedicColor        = Color3.fromRGB(255, 169, 108),
-        InfectionHighColor = Color3.fromRGB(178, 34, 34),
-        InfectionLowColor  = Color3.fromRGB(255, 169, 108),
-        UpdateInterval    = 2.0,
-    },
+local COLORS = {
+    lowHealth = Color3.fromRGB(255, 169, 108),
+    infected = Color3.fromRGB(178, 34, 34),
+    highInfection = Color3.fromRGB(178, 34, 34)
+}
+
+local ESP_CONFIG = {
+    ToggleKey = Enum.KeyCode.F2,
+    RefreshRate = 1,
+}
+
+local KILL_AURA_CONFIG = {
+    ToggleKey = Enum.KeyCode.F1,
+    Range = 25,
+    WeaponPatterns = {
+        "%%a+Axe", "%%a+Sabre", "Stake", "Spontoon", "Pike", "Spade", "Heavy Sabre"
+    }
+}
+
+local PLAYER_ESP_SETTINGS = {
+    lowHealthThreshold = 60,
+    highInfectionThreshold = 89
 }
 
 -- ========== STATE ==========
--- NOTE: safeCall is defined AFTER State so it can reference State.errorHandler safely.
+local highlightContainer = nil
+
 local State = {
-    killAuraActive  = false,
-    playerESPActive = false,
-
-    connections    = ConnectionManager.new(),
-    espConnections = ConnectionManager.new(),
-
-    espHighlights    = {},   -- model -> Highlight
-    espPlayerModels  = {},   -- model -> true
-
+    activeHighlights = {},
+    connections = ConnectionManager.new(),
+    highlightConnections = ConnectionManager.new(),
+    characterDied = false,
+    killAuraEnabled = false,
+    espEnabled = true,
+    lastHighlightUpdate = 0,
+    currentWeaponRemote = nil,
     errorHandler = ErrorHandler.new(),
-
-    inventoryState = {
-        hasMedical = false,
-        hasMercy   = false,
-    },
-
-    -- Reusable physics param objects (allocated once per aura activation)
-    killAuraOverlapParams = nil,
-    killAuraRayParams     = nil,
-
-    _espTrackingSet = false,
+    playerEquipment = {}
 }
 
 -- ========== UTILITY ==========
--- Defined after State so State.errorHandler is always valid when called.
 local function safeCall(func, context, suppressError)
-    local function handler(err)
+    local handler = function(err)
         return debug.traceback(tostring(err), 2)
     end
     local success, result = xpcall(func, handler)
     if not success then
-        if State and State.errorHandler then
-            State.errorHandler:Log(context or "Unknown", result, "Error", suppressError)
-        else
-            warn("[safeCall] " .. tostring(result))
-        end
+        State.errorHandler:Log(context or "Unknown", result, "Error", suppressError)
         return nil
     end
     return result
 end
 
--- ========== HEAD LOCK (ALWAYS ACTIVE) ==========
-local FlintLock  = require(ReplicatedStorage.Modules.Weapons.Flintlock)
-local MeleeBase  = require(ReplicatedStorage.Modules.Weapons.MeleeBase)
-local originalBayonetHitCheck, originalMeleeHitCheck
-
--- Cached zombie head lookup: zombieModel -> headPart
--- Invalidated automatically when the head part leaves the workspace.
-local zombieHeadCache = {}
-
-local function getZombieHead(zombieModel)
-    local cached = zombieHeadCache[zombieModel]
-    if cached and cached.Parent then
-        return cached
-    end
-    -- Search and cache
-    for _, child in ipairs(zombieModel:GetChildren()) do
-        if child.Name == "Head" and (child:IsA("Part") or child:IsA("MeshPart")) then
-            zombieHeadCache[zombieModel] = child
-            -- Invalidate when the part is removed
-            child.AncestryChanged:Connect(function()
-                if not child.Parent then
-                    zombieHeadCache[zombieModel] = nil
-                end
-            end)
-            return child
-        end
-    end
-    return nil
+local function isPlayerAlive()
+    if State.characterDied then return false end
+    return safeCall(function()
+        local character = localPlayer.Character
+        if not character then return false end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        return humanoid and humanoid.Health > 0
+    end, "isPlayerAlive", true) or false
 end
 
-if not FlintLock._gbHubPatched then
-    originalBayonetHitCheck = FlintLock.BayonetHitCheck
-    FlintLock.BayonetHitCheck = function(self, startPos, direction, raycastParams, alreadyHit)
-        local rayResult = Workspace:Raycast(startPos, direction, raycastParams)
-        if rayResult then
-            local parent = rayResult.Instance.Parent
-            if parent and parent.Name == "m_Zombie" then
-                local orig = parent:FindFirstChild("Orig")
-                if orig and orig.Value then
-                    local headPart = getZombieHead(parent)
-                    if headPart then
-                        self.remoteEvent:FireServer(
-                            "Bayonet_HitZombie", orig.Value,
-                            headPart.CFrame.Position, true, "Head"
-                        )
-                        return 1
+local function getLocalPlayerRoot()
+    return safeCall(function()
+        local character = localPlayer.Character
+        return character and character:FindFirstChild("HumanoidRootPart")
+    end, "getLocalPlayerRoot", true)
+end
+
+local function isValidObject(obj)
+    return safeCall(function()
+        return obj and (obj:IsA("Model") or obj:IsA("Part") or obj:IsA("BasePart"))
+    end, "isValidObject", true) or false
+end
+
+local function isLocalPlayerModel(model)
+    if not model or not localPlayer then return false end
+    return model == localPlayer.Character
+end
+
+-- ========== WEAPON DETECTION ==========
+local function findCurrentWeaponRemote()
+    return safeCall(function()
+        local character = localPlayer.Character
+        if not character then return nil end
+        
+        for _, pattern in ipairs(KILL_AURA_CONFIG.WeaponPatterns) do
+            for _, child in ipairs(character:GetChildren()) do
+                if string.match(child.Name, pattern) then
+                    local remote = child:FindFirstChild("RemoteEvent")
+                    if remote then
+                        return remote, child.Name
                     end
                 end
             end
         end
-        return originalBayonetHitCheck(self, startPos, direction, raycastParams, alreadyHit)
-    end
-
-    originalMeleeHitCheck = MeleeBase.MeleeHitCheck
-    MeleeBase.MeleeHitCheck = function(self, startPos, direction, raycastParams, hitTable, isCharge)
-        local rayResult = Workspace:Raycast(startPos, direction, raycastParams)
-        if rayResult then
-            local parent = rayResult.Instance.Parent
-            if parent and parent.Name == "m_Zombie" then
-                local orig = parent:FindFirstChild("Orig")
-                if orig and orig.Value then
-                    local headPart = getZombieHead(parent)
-                    if headPart then
-                        local directionVec = headPart.CFrame.Position - startPos
-                        if directionVec:Dot(directionVec) > 1 then
-                            directionVec = directionVec.Unit
+        
+        local backpack = localPlayer.Backpack
+        if backpack then
+            for _, pattern in ipairs(KILL_AURA_CONFIG.WeaponPatterns) do
+                for _, child in ipairs(backpack:GetChildren()) do
+                    if string.match(child.Name, pattern) then
+                        local remote = child:FindFirstChild("RemoteEvent")
+                        if remote then
+                            return remote, child.Name
                         end
-                        self.remoteEvent:FireServer(
-                            "HitZombie", orig.Value,
-                            headPart.CFrame.Position, true,
-                            directionVec * 25, "Head", rayResult.Normal
-                        )
-                        return 1
                     end
                 end
             end
         end
-        return originalMeleeHitCheck(self, startPos, direction, raycastParams, hitTable, isCharge)
-    end
-
-    FlintLock._gbHubPatched = true
+        
+        return nil, nil
+    end, "findCurrentWeaponRemote", true)
 end
 
--- ========== AUTOPLAY (ALWAYS ACTIVE) ==========
-local namecallHook
-namecallHook = hookmetamethod(game, "__namecall", function(self, ...)
-    local args   = { ... }
-    local method = getnamecallmethod():lower()
-    if not checkcaller()
-        and self.Name == "RemoteEvent"
-        and method == "fireserver"
-        and args[1] == "UpdateAccuracy"
-    then
-        args[2] = 100
-        return namecallHook(self, unpack(args))
+-- ========== HIGHLIGHT CONTAINER ==========
+local function setupHighlightContainer()
+    safeCall(function()
+        local existing = localPlayer.PlayerGui:FindFirstChild("ESPHighlights")
+        if existing then existing:Destroy() end
+
+        highlightContainer = Instance.new("Folder")
+        highlightContainer.Name = "ESPHighlights"
+        highlightContainer.Parent = localPlayer.PlayerGui
+    end, "setupHighlightContainer")
+end
+
+-- ========== HIGHLIGHT MANAGEMENT ==========
+local function cleanupHighlight(parent)
+    safeCall(function()
+        local highlight = State.activeHighlights[parent]
+        if highlight and highlight.Parent then
+            highlight:Destroy()
+        end
+        State.activeHighlights[parent] = nil
+    end, "cleanupHighlight", true)
+end
+
+local function clearAllHighlights()
+    safeCall(function()
+        for _, highlight in pairs(State.activeHighlights) do
+            if highlight and highlight.Parent then
+                highlight:Destroy()
+            end
+        end
+        table.clear(State.activeHighlights)
+
+        if highlightContainer then
+            for _, child in ipairs(highlightContainer:GetChildren()) do
+                child:Destroy()
+            end
+        end
+    end, "clearAllHighlights", true)
+end
+
+local function createHighlight(parent, color, fillTransparency, outlineTransparency)
+    if not parent or not parent.Parent then return nil end
+    if State.activeHighlights[parent] then return nil end
+    if not highlightContainer or not highlightContainer.Parent then return nil end
+
+    return safeCall(function()
+        local highlight = Instance.new("Highlight")
+        highlight.FillColor = color or Color3.fromRGB(255, 255, 255)
+        highlight.FillTransparency = fillTransparency or 0.5
+        highlight.OutlineColor = color or Color3.fromRGB(255, 255, 255)
+        highlight.OutlineTransparency = outlineTransparency or 0.2
+        highlight.Adornee = parent
+        highlight.Parent = highlightContainer
+
+        State.activeHighlights[parent] = highlight
+
+        local ancestryConn
+        ancestryConn = parent.AncestryChanged:Connect(function(_, newParent)
+            if newParent == nil then
+                cleanupHighlight(parent)
+                ancestryConn:Disconnect()
+            end
+        end)
+        State.highlightConnections:Add(ancestryConn)
+
+        return highlight
+    end, "createHighlight") or nil
+end
+
+-- ========== PLAYER EQUIPMENT TRACKING ==========
+local function updatePlayerEquipment()
+    return safeCall(function()
+        State.playerEquipment = {
+            hasMedicalSupplies = false,
+            hasMercy = false
+        }
+        
+        local character = localPlayer.Character
+        if character then
+            if character:FindFirstChild("Medical Supplies") and character["Medical Supplies"]:IsA("Tool") then
+                State.playerEquipment.hasMedicalSupplies = true
+            end
+            if character:FindFirstChild("Mercy") and character["Mercy"]:IsA("Tool") then
+                State.playerEquipment.hasMercy = true
+            end
+        end
+        
+        local backpack = localPlayer.Backpack
+        if backpack then
+            if backpack:FindFirstChild("Medical Supplies") then
+                State.playerEquipment.hasMedicalSupplies = true
+            end
+            if backpack:FindFirstChild("Mercy") then
+                State.playerEquipment.hasMercy = true
+            end
+        end
+        
+        return State.playerEquipment
+    end, "updatePlayerEquipment", true) or State.playerEquipment
+end
+
+-- ========== PLAYER ESP ==========
+local function shouldHighlightPlayer(playerModel)
+    if not playerModel or not playerModel.Parent then return false, nil end
+    if isLocalPlayerModel(playerModel) then return false, nil end
+    
+    local humanoid = playerModel:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false, nil end
+    
+    local health = humanoid.Health
+    local equipment = updatePlayerEquipment()
+    
+    -- Medic ESP (low health players)
+    if equipment.hasMedicalSupplies and health < PLAYER_ESP_SETTINGS.lowHealthThreshold then
+        return true, COLORS.lowHealth, 0.8, 0.2
     end
-    return namecallHook(self, ...)
-end)
+    
+    -- Father Infection ESP
+    if equipment.hasMercy then
+        local userStates = playerModel:FindFirstChild("UserStates")
+        if userStates then
+            local infectedValue = userStates:FindFirstChild("Infected")
+            if infectedValue then
+                local infection = infectedValue.Value
+                if infection > 0 then
+                    if infection > PLAYER_ESP_SETTINGS.highInfectionThreshold then
+                        return true, COLORS.highInfection, 0.5, 0.2
+                    else
+                        return true, COLORS.infected, 0.8, 0.2
+                    end
+                end
+            end
+        end
+    end
+    
+    return false, nil
+end
+
+local function updatePlayerHighlights()
+    if not State.espEnabled then return end
+    
+    safeCall(function()
+        local playersFolder = Workspace:FindFirstChild("Players")
+        if not playersFolder then return end
+        
+        local equipment = updatePlayerEquipment()
+        
+        local function processPlayerGroup(group)
+            if not group then return end
+            
+            for _, playerModel in ipairs(group:GetChildren()) do
+                if playerModel:IsA("Model") then
+                    local shouldHighlight, color, fillTrans, outlineTrans = shouldHighlightPlayer(playerModel, equipment)
+                    
+                    if shouldHighlight then
+                        local existing = State.activeHighlights[playerModel]
+                        if existing then
+                            existing.FillColor = color
+                            existing.FillTransparency = fillTrans
+                            existing.OutlineColor = color
+                            existing.OutlineTransparency = outlineTrans
+                        else
+                            createHighlight(playerModel, color, fillTrans, outlineTrans)
+                        end
+                    else
+                        cleanupHighlight(playerModel)
+                    end
+                end
+            end
+        end
+        
+        processPlayerGroup(playersFolder:FindFirstChild("Survivors"))
+        processPlayerGroup(playersFolder:FindFirstChild("Killers"))
+        
+        -- Also check for players that might be in other folders
+        for _, child in ipairs(playersFolder:GetChildren()) do
+            if child:IsA("Model") and child.Name ~= "Survivors" and child.Name ~= "Killers" then
+                local shouldHighlight, color, fillTrans, outlineTrans = shouldHighlightPlayer(child, equipment)
+                if shouldHighlight then
+                    local existing = State.activeHighlights[child]
+                    if existing then
+                        existing.FillColor = color
+                        existing.FillTransparency = fillTrans
+                        existing.OutlineColor = color
+                        existing.OutlineTransparency = outlineTrans
+                    else
+                        createHighlight(child, color, fillTrans, outlineTrans)
+                    end
+                else
+                    cleanupHighlight(child)
+                end
+            end
+        end
+    end, "updatePlayerHighlights", true)
+end
 
 -- ========== KILL AURA ==========
-local function getCurrentWeapon()
-    local char = localPlayer.Character
-    if not char then return nil end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool then return tool end
-    for _, child in ipairs(localPlayer.Backpack:GetChildren()) do
-        if child:IsA("Tool") then return child end
-    end
-    return nil
-end
-
-local function matchesWeaponPattern(weaponName)
-    for _, pattern in ipairs(CONFIG.KillAura.WeaponPatterns) do
-        if string.match(weaponName, pattern) then return true end
-    end
-    return false
-end
-
-local function attackZombie(zombieModel, weaponName, headPart, hrp)
-    -- Safe traversal: each step uses FindFirstChild so no index error if a
-    -- folder disappears between the aura tick starting and this call.
-    local orig = zombieModel:FindFirstChild("Orig")
-    if not orig or not orig.Value then return end
-
-    local headPos  = headPart.CFrame.Position
-    local direction = headPos - hrp.CFrame.Position
-
-    -- Reuse the pre-allocated RaycastParams; update filter for current char
-    local rayResult = Workspace:Raycast(hrp.CFrame.Position, direction, State.killAuraRayParams)
-    if not rayResult or rayResult.Instance.Parent ~= zombieModel then return end
-
-    local forceDir = direction
-    if forceDir:Dot(forceDir) > 1 then
-        forceDir = forceDir.Unit
-    end
-    local force = forceDir * 25
-
-    -- Safe path to the weapon's RemoteEvent
-    local playersFolder = Workspace:FindFirstChild("Players")
-    local playerFolder  = playersFolder and playersFolder:FindFirstChild(localPlayer.Name)
-    local weaponFolder  = playerFolder  and playerFolder:FindFirstChild(weaponName)
-    local remoteEvent   = weaponFolder  and weaponFolder:FindFirstChild("RemoteEvent")
-    if not remoteEvent then return end
-
-    remoteEvent:FireServer("Swing", "Thrust")
-    remoteEvent:FireServer("HitZombie", orig.Value, headPos, true, force, "Head", rayResult.Normal)
-    ReplicatedStorage.Remotes.Gib:FireServer(orig.Value, "Head", headPos, rayResult.Normal, true)
-end
-
-local function killAuraLoop()
-    while State.killAuraActive do
-        local char = localPlayer.Character
-        if not char then task.wait(0.1); continue end
-        local humanoid = char:FindFirstChildOfClass("Humanoid")
-        if not humanoid or humanoid.Health <= 0 then task.wait(0.1); continue end
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if not hrp then task.wait(0.1); continue end
-
-        local weapon = getCurrentWeapon()
-        if not weapon or not matchesWeaponPattern(weapon.Name) then
-            task.wait(0.1)
-            continue
+local function getAllZombiesInRange(rootPart, range)
+    local zombiesInRange = {}
+    
+    safeCall(function()
+        local zombiesFolder = Workspace:FindFirstChild("Zombies") or Workspace:FindFirstChild("m_Zombie")
+        if not zombiesFolder then
+            -- Fallback: search workspace for zombies
+            for _, descendant in ipairs(Workspace:GetDescendants()) do
+                if descendant.Name == "m_Zombie" and descendant:IsA("Model") then
+                    local zroot = descendant:FindFirstChild("HumanoidRootPart") or descendant:FindFirstChild("Orig") and descendant.Orig.Value and descendant.Orig.Value:FindFirstChild("HumanoidRootPart")
+                    if zroot then
+                        local distance = (zroot.Position - rootPart.Position).Magnitude
+                        if distance <= range then
+                            table.insert(zombiesInRange, {
+                                model = descendant,
+                                rootPart = zroot,
+                                distance = distance
+                            })
+                        end
+                    end
+                end
+            end
+            return
         end
-        local weaponName = weapon.Name
-
-        -- Update the filter on the reused params to match the current character
-        State.killAuraRayParams.FilterDescendantsInstances     = { char }
-        State.killAuraOverlapParams.FilterDescendantsInstances = { char }
-
-        -- Create hitbox once; reuse every subsequent tick
-        local hitbox = hrp:FindFirstChild("GBHitbox")
-        if not hitbox then
-            hitbox      = Instance.new("Part")
-            hitbox.Name = "GBHitbox"
-            hitbox.Size = Vector3.new(
-                CONFIG.KillAura.Range * 2, 7, CONFIG.KillAura.Range * 2
-            )
-            hitbox.Transparency = 1
-            hitbox.CanCollide   = false
-            hitbox.Anchored     = false
-            hitbox.Parent       = hrp
-            local weld  = Instance.new("WeldConstraint")
-            weld.Part0  = hitbox
-            weld.Part1  = hrp
-            weld.Parent = hitbox
-        end
-
-        local partsInRange = Workspace:GetPartsInPart(hitbox, State.killAuraOverlapParams)
-        local zombiesHit   = {}
-
-        for _, part in ipairs(partsInRange) do
-            local parent = part.Parent
-            if parent
-                and parent.Name == "m_Zombie"
-                and not zombiesHit[parent]
-            then
-                -- Early-exit: must have Orig and be alive
-                local orig     = parent:FindFirstChild("Orig")
-                local zHumano  = parent:FindFirstChildOfClass("Humanoid")
-                if orig and orig.Value and zHumano and zHumano.Health > 0 then
-                    local headPart = getZombieHead(parent)
-                    if headPart then
-                        attackZombie(parent, weaponName, headPart, hrp)
-                        zombiesHit[parent] = true
+        
+        for _, zombie in ipairs(zombiesFolder:GetChildren()) do
+            if zombie:IsA("Model") then
+                local zroot = zombie:FindFirstChild("HumanoidRootPart")
+                if not zroot then
+                    local orig = zombie:FindFirstChild("Orig")
+                    if orig and orig.Value then
+                        zroot = orig.Value:FindFirstChild("HumanoidRootPart")
+                    end
+                end
+                
+                if zroot then
+                    local distance = (zroot.Position - rootPart.Position).Magnitude
+                    if distance <= range then
+                        table.insert(zombiesInRange, {
+                            model = zombie,
+                            rootPart = zroot,
+                            distance = distance
+                        })
                     end
                 end
             end
         end
-
-        task.wait(CONFIG.KillAura.Cooldown)
-    end
-
-    -- Clean up hitbox when aura deactivates
-    local char = localPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    local hitbox = hrp and hrp:FindFirstChild("GBHitbox")
-    if hitbox then hitbox:Destroy() end
+    end, "getAllZombiesInRange", true)
+    
+    -- Sort by distance (closest first)
+    table.sort(zombiesInRange, function(a, b)
+        return a.distance < b.distance
+    end)
+    
+    return zombiesInRange
 end
 
-local function toggleKillAura()
-    State.killAuraActive = not State.killAuraActive
-    State.errorHandler:Log(
-        "KillAura",
-        State.killAuraActive and "Enabled" or "Disabled",
-        "Info"
-    )
-
-    if State.killAuraActive then
-        -- Allocate reusable physics params once per activation
-        local char = localPlayer.Character
-
-        local rp = RaycastParams.new()
-        rp.FilterDescendantsInstances = { char }
-        rp.FilterType = Enum.RaycastFilterType.Exclude
-        State.killAuraRayParams = rp
-
-        local op = OverlapParams.new()
-        op.FilterDescendantsInstances = { char }
-        op.FilterType = Enum.RaycastFilterType.Exclude
-        State.killAuraOverlapParams = op
-
-        task.spawn(killAuraLoop)
-    else
-        -- Params will be GC'd; nil the references
-        State.killAuraRayParams     = nil
-        State.killAuraOverlapParams = nil
-    end
+local function getZombieHead(zombie)
+    return safeCall(function()
+        -- Check for direct Head child
+        local head = zombie:FindFirstChild("Head")
+        if head and (head:IsA("Part") or head:IsA("MeshPart")) then
+            return head
+        end
+        
+        -- Check in Orig value
+        local orig = zombie:FindFirstChild("Orig")
+        if orig and orig.Value then
+            head = orig.Value:FindFirstChild("Head")
+            if head and (head:IsA("Part") or head:IsA("MeshPart")) then
+                return head
+            end
+        end
+        
+        -- Search all children for Head
+        for _, child in ipairs(zombie:GetChildren()) do
+            if child.Name == "Head" and (child:IsA("Part") or child:IsA("MeshPart")) then
+                return child
+            end
+        end
+        
+        return nil
+    end, "getZombieHead", true)
 end
 
--- ========== PLAYER ESP (MEDIC & INFECTION) ==========
-local function removePlayerESP(model)
-    local highlight = State.espHighlights[model]
-    if highlight then
-        highlight:Destroy()
-        State.espHighlights[model] = nil
-    end
+local function attackZombie(zombieInfo, weaponRemote, rootPart)
+    if not weaponRemote or not rootPart then return false end
+    
+    return safeCall(function()
+        local head = getZombieHead(zombieInfo.model)
+        if not head then return false end
+        
+        local gibRemote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("Gib")
+        
+        local hitPos = head.Position
+        local direction = (hitPos - rootPart.Position).Unit
+        local knockback = direction * 25
+        
+        local zombieTarget = zombieInfo.model
+        local orig = zombieTarget:FindFirstChild("Orig")
+        local actualZombie = orig and orig.Value or zombieTarget
+        
+        -- Fire Swing
+        weaponRemote:FireServer("Swing", "Thrust")
+        
+        -- Fire Gib if available
+        if gibRemote then
+            gibRemote:FireServer(actualZombie, "Head", hitPos, direction, true)
+        end
+        
+        -- Fire HitZombie
+        weaponRemote:FireServer("HitZombie", actualZombie, hitPos, true, knockback, "Head", direction)
+        
+        return true
+    end, "attackZombie", true) or false
 end
 
-local function updateInventoryState()
-    local hasMedical = false
-    local hasMercy   = false
-    local function checkTool(tool)
-        if tool.Name == "Medical Supplies" then hasMedical = true end
-        if tool.Name == "Mercy"            then hasMercy   = true end
-    end
-    for _, tool in ipairs(localPlayer.Backpack:GetChildren()) do
-        if tool:IsA("Tool") then checkTool(tool) end
-    end
-    if localPlayer.Character then
-        for _, tool in ipairs(localPlayer.Character:GetChildren()) do
-            if tool:IsA("Tool") then checkTool(tool) end
+local function executeKillAura()
+    if not State.killAuraEnabled then return end
+    if not isPlayerAlive() then return end
+    
+    safeCall(function()
+        local rootPart = getLocalPlayerRoot()
+        if not rootPart then return end
+        
+        local weaponRemote, weaponName = findCurrentWeaponRemote()
+        if not weaponRemote then
+            State.errorHandler:Log("KillAura", "No compatible weapon found", "Warning", true)
+            return
         end
-    end
-    State.inventoryState.hasMedical = hasMedical
-    State.inventoryState.hasMercy   = hasMercy
+        
+        local zombies = getAllZombiesInRange(rootPart, KILL_AURA_CONFIG.Range)
+        
+        if #zombies > 0 then
+            State.errorHandler:Log("KillAura", string.format("Attacking %d zombie(s) with %s", #zombies, weaponName or "Unknown"), "Info", true)
+        end
+        
+        -- Hit all zombies in range at once
+        for _, zombieInfo in ipairs(zombies) do
+            attackZombie(zombieInfo, weaponRemote, rootPart)
+            task.wait(0.05) -- Small delay between attacks to prevent overwhelming
+        end
+    end, "executeKillAura", true)
 end
 
-local function setupInventoryTracking()
-    -- Backpack changes
-    State.espConnections:Add(localPlayer.Backpack.ChildAdded:Connect(function(child)
-        if child:IsA("Tool") then updateInventoryState() end
-    end))
-    State.espConnections:Add(localPlayer.Backpack.ChildRemoved:Connect(function(child)
-        if child:IsA("Tool") then updateInventoryState() end
-    end))
-
-    -- Per-character tool tracking; connections registered into espConnections
-    -- so they are all torn down on cleanup() without a separate table.
-    local function connectCharTools(character)
-        if not character then return end
-        State.espConnections:Add(character.ChildAdded:Connect(function(child)
-            if child:IsA("Tool") then updateInventoryState() end
-        end))
-        State.espConnections:Add(character.ChildRemoved:Connect(function(child)
-            if child:IsA("Tool") then updateInventoryState() end
-        end))
-    end
-
-    State.espConnections:Add(localPlayer.CharacterAdded:Connect(function(character)
-        connectCharTools(character)
-        updateInventoryState()
-    end))
-
-    if localPlayer.Character then
-        connectCharTools(localPlayer.Character)
-    end
-
-    updateInventoryState()
+-- ========== AUTO-PLAY (ALWAYS ACTIVE) ==========
+local function setupAutoPlay()
+    local namecall = nil
+    
+    namecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local args = {...}
+        local method = getnamecallmethod():lower()
+        
+        if not checkcaller() and self.Name == "RemoteEvent" and method == "fireserver" then
+            if args[1] == "UpdateAccuracy" then
+                args[2] = 100
+                return namecall(self, unpack(args))
+            end
+        end
+        return namecall(self, ...)
+    end)
+    
+    State.errorHandler:Log("AutoPlay", "Auto-Play is always active", "Info")
 end
 
-local function setupESPPlayerTracking()
-    local function addModel(model)
-        if model and model:IsA("Model") then
-            State.espPlayerModels[model] = true
+-- ========== HEAD LOCK (ALWAYS ACTIVE) ==========
+local function setupHeadLock()
+    safeCall(function()
+        -- Hook Flintlock BayonetHitCheck
+        local FlintLock = pcall(function()
+            return require(ReplicatedStorage.Modules.Weapons.Flintlock)
+        end)
+        
+        if FlintLock then
+            local originFlintlockFunction = FlintLock.BayonetHitCheck
+            
+            FlintLock.BayonetHitCheck = function(p115, p116, p117, p118, p119)
+                local v120 = Workspace:Raycast(p116, p117, p118)
+                if v120 then
+                    if v120.Instance.Parent.Name == "m_Zombie" then
+                        local v123 = v120.Instance.Parent:FindFirstChild("Orig")
+                        if v123 then
+                            local Head = nil
+                            for i, part in pairs(v120.Instance.Parent:GetChildren()) do
+                                if part.Name == "Head" and (part.ClassName == "Part" or part.ClassName == "MeshPart") then
+                                    Head = part
+                                end
+                            end
+                            if Head then
+                                p115.remoteEvent:FireServer("Bayonet_HitZombie", v123.Value, Head.CFrame.Position, true, "Head")
+                                local v_u_124 = v123.Value
+                                local v_u_125 = tick()
+                                v_u_124:SetAttribute("WepHitID", tick())
+                                v_u_124:SetAttribute("WepHitDirection", p117 * 10)
+                                v_u_124:SetAttribute("WepHitPos", v120.Position)
+                                task.delay(0.2, function()
+                                    if v_u_124:GetAttribute("WepHitID") == v_u_125 then
+                                        v_u_124:SetAttribute("WepHitDirection", nil)
+                                        v_u_124:SetAttribute("WepHitPos", nil)
+                                        v_u_124:SetAttribute("WepHitID", nil)
+                                    end
+                                end)
+                            end
+                            return 1
+                        end
+                    end
+                end
+                return originFlintlockFunction(p115, p116, p117, p118, p119)
+            end
         end
-    end
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= localPlayer then
-            if player.Character then addModel(player.Character) end
-
-            -- CharacterAdded: new model for this existing player
-            State.espConnections:Add(player.CharacterAdded:Connect(function(char)
-                addModel(char)
-            end))
-
-            -- CharacterRemoving: immediately clean up highlight for old model
-            State.espConnections:Add(player.CharacterRemoving:Connect(function(oldChar)
-                removePlayerESP(oldChar)
-                State.espPlayerModels[oldChar] = nil
-            end))
+        
+        -- Hook MeleeBase MeleeHitCheck
+        local MeleeBase = pcall(function()
+            return require(ReplicatedStorage.Modules.Weapons.MeleeBase)
+        end)
+        
+        if MeleeBase then
+            local originMeleeFunction = MeleeBase.MeleeHitCheck
+            
+            MeleeBase.MeleeHitCheck = function(p100, p101, p102, p103, p104, p105)
+                local v106 = Workspace:Raycast(p101, p102, p103)
+                if v106 then
+                    if v106.Instance.Parent.Name == "m_Zombie" then
+                        local v109 = v106.Instance.Parent:FindFirstChild("Orig")
+                        if v109 then
+                            local Head = nil
+                            for i, part in pairs(v106.Instance.Parent:GetChildren()) do
+                                if part.Name == "Head" and (part.ClassName == "Part" or part.ClassName == "MeshPart") then
+                                    Head = part
+                                end
+                            end
+                            if Head then
+                                if p105 then
+                                    p100.remoteEvent:FireServer("ThrustCharge", v109.Value, v106.Position, v106.Normal)
+                                else
+                                    local u112 = v109.Value
+                                    local v113 = Head.CFrame.Position - p101
+                                    if v113:Dot(v113) > 1 then
+                                        v113 = v113.Unit
+                                    end
+                                    local v114 = v113 * 25
+                                    p100.remoteEvent:FireServer("HitZombie", u112, Head.CFrame.Position, true, v114, "Head", v106.Normal)
+                                end
+                            end
+                            return 1
+                        end
+                    end
+                end
+                return originMeleeFunction(p100, p101, p102, p103, p104, p105)
+            end
         end
-    end
-
-    State.espConnections:Add(Players.PlayerAdded:Connect(function(player)
-        if player == localPlayer then return end
-        if player.Character then addModel(player.Character) end
-
-        State.espConnections:Add(player.CharacterAdded:Connect(function(char)
-            addModel(char)
-        end))
-        State.espConnections:Add(player.CharacterRemoving:Connect(function(oldChar)
-            removePlayerESP(oldChar)
-            State.espPlayerModels[oldChar] = nil
-        end))
-    end))
-
-    State.espConnections:Add(Players.PlayerRemoving:Connect(function(player)
-        local model = player.Character
-        if model then
-            removePlayerESP(model)
-            State.espPlayerModels[model] = nil
-        end
-    end))
+        
+        State.errorHandler:Log("HeadLock", "Head Lock is always active", "Info")
+    end, "setupHeadLock", true)
 end
 
-local function updatePlayerESP()
-    if not State.playerESPActive then
-        for model, highlight in pairs(State.espHighlights) do
-            if highlight then highlight:Destroy() end
+-- ========== WEAPON EQUIP/UNEQUIP HANDLING ==========
+local function onToolEquipped(tool)
+    safeCall(function()
+        if tool.Name == "Medical Supplies" or tool.Name == "Mercy" then
+            updatePlayerEquipment()
+            updatePlayerHighlights()
         end
-        State.espHighlights = {}
-        return
-    end
+    end, "onToolEquipped", true)
+end
 
-    local playersFolder = Workspace:FindFirstChild("Players")
-    if not playersFolder then return end
-
-    local hasMedical = State.inventoryState.hasMedical
-    local hasMercy   = State.inventoryState.hasMercy
-
-    -- Nothing to highlight; clear and bail early
-    if not hasMedical and not hasMercy then
-        for model, highlight in pairs(State.espHighlights) do
-            if highlight then highlight:Destroy() end
+local function onToolUnequipped(tool)
+    safeCall(function()
+        if tool.Name == "Medical Supplies" or tool.Name == "Mercy" then
+            updatePlayerEquipment()
+            -- Re-scan highlights since equipment changed
+            if State.espEnabled then
+                updatePlayerHighlights()
+            end
         end
-        State.espHighlights = {}
-        return
-    end
+    end, "onToolUnequipped", true)
+end
 
-    for model in pairs(State.espPlayerModels) do
-        -- Stale model (character was replaced or removed)
-        if not model.Parent or model.Parent ~= playersFolder then
-            removePlayerESP(model)
-            State.espPlayerModels[model] = nil
-            continue
-        end
-
-        local humanoid = model:FindFirstChildOfClass("Humanoid")
-        if not humanoid or humanoid.Health <= 0 then
-            removePlayerESP(model)
-            continue
-        end
-
-        local shouldHighlight = false
-        local color = CONFIG.PlayerESP.MedicColor
-
-        if hasMedical and humanoid.Health < 60 then
-            shouldHighlight = true
-            color = CONFIG.PlayerESP.MedicColor
-        end
-
-        if hasMercy then
-            local userStates = model:FindFirstChild("UserStates")
-            if userStates then
-                local infected = userStates:FindFirstChild("Infected")
-                if infected and infected.Value > 10 then
-                    shouldHighlight = true
-                    color = infected.Value > 89
-                        and CONFIG.PlayerESP.InfectionHighColor
-                        or  CONFIG.PlayerESP.InfectionLowColor
+local function setupToolHandlers()
+    safeCall(function()
+        local character = localPlayer.Character
+        if character then
+            for _, tool in ipairs(character:GetChildren()) do
+                if tool:IsA("Tool") then
+                    if tool.Name == "Medical Supplies" or tool.Name == "Mercy" then
+                        onToolEquipped(tool)
+                    end
                 end
             end
         end
-
-        if shouldHighlight then
-            local highlight = State.espHighlights[model]
-            if not highlight then
-                highlight               = Instance.new("Highlight")
-                highlight.Adornee       = model
-                highlight.FillTransparency    = 0.8
-                highlight.OutlineTransparency = 0.2
-                highlight.Parent        = model
-                State.espHighlights[model] = highlight
+        
+        State.connections:Add(localPlayer.CharacterAdded:Connect(function(character)
+            character.ChildAdded:Connect(function(child)
+                if child:IsA("Tool") then
+                    if child.Name == "Medical Supplies" or child.Name == "Mercy" then
+                        onToolEquipped(child)
+                    end
+                end
+            end)
+            character.ChildRemoved:Connect(function(child)
+                if child:IsA("Tool") then
+                    if child.Name == "Medical Supplies" or child.Name == "Mercy" then
+                        onToolUnequipped(child)
+                    end
+                end
+            end)
+        end))
+        
+        local backpack = localPlayer.Backpack
+        backpack.ChildAdded:Connect(function(child)
+            if child:IsA("Tool") then
+                if child.Name == "Medical Supplies" or child.Name == "Mercy" then
+                    updatePlayerEquipment()
+                end
             end
-            highlight.FillColor    = color
-            highlight.OutlineColor = color
-        else
-            removePlayerESP(model)
-        end
-    end
-end
-
-local function startPlayerESPLoop()
-    if not State._espTrackingSet then
-        setupInventoryTracking()
-        setupESPPlayerTracking()
-        State._espTrackingSet = true
-    end
-
-    while State.playerESPActive do
-        safeCall(updatePlayerESP, "PlayerESP", true)
-        task.wait(CONFIG.PlayerESP.UpdateInterval)
-    end
-
-    -- Cleanup highlights on toggle-off
-    safeCall(function()
-        for model, highlight in pairs(State.espHighlights) do
-            if highlight then highlight:Destroy() end
-        end
-        State.espHighlights = {}
-    end, "PlayerESPCleanup", true)
-end
-
-local function togglePlayerESP()
-    State.playerESPActive = not State.playerESPActive
-    State.errorHandler:Log(
-        "PlayerESP",
-        State.playerESPActive and "Enabled" or "Disabled",
-        "Info"
-    )
-    if State.playerESPActive then
-        task.spawn(startPlayerESPLoop)
-    end
+        end)
+        backpack.ChildRemoved:Connect(function(child)
+            if child:IsA("Tool") then
+                if child.Name == "Medical Supplies" or child.Name == "Mercy" then
+                    updatePlayerEquipment()
+                    updatePlayerHighlights()
+                end
+            end
+        end)
+    end, "setupToolHandlers", true)
 end
 
 -- ========== INPUT HANDLING ==========
 local function setupInputHandlers()
+    -- F1: Toggle Kill Aura
     State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
-        if input.KeyCode == CONFIG.KillAura.Keybind then
-            toggleKillAura()
-        elseif input.KeyCode == CONFIG.PlayerESP.Keybind then
-            togglePlayerESP()
+        if input.KeyCode == KILL_AURA_CONFIG.ToggleKey then
+            State.killAuraEnabled = not State.killAuraEnabled
+            State.errorHandler:Log("Input", "Kill Aura " .. (State.killAuraEnabled and "ENABLED" or "DISABLED"), "Info")
+        end
+    end))
+    
+    -- F2: Toggle ESP
+    State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == ESP_CONFIG.ToggleKey then
+            State.espEnabled = not State.espEnabled
+            if State.espEnabled then
+                updatePlayerHighlights()
+            else
+                clearAllHighlights()
+            end
+            State.errorHandler:Log("Input", "ESP " .. (State.espEnabled and "ENABLED" or "DISABLED"), "Info")
+        end
+    end))
+    
+    -- F1 + F2 combo for status (optional)
+    State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == KILL_AURA_CONFIG.ToggleKey and UserInputService:IsKeyDown(ESP_CONFIG.ToggleKey) then
+            State.errorHandler:Log("Status", string.format("Kill Aura: %s, ESP: %s", 
+                State.killAuraEnabled and "ON" or "OFF",
+                State.espEnabled and "ON" or "OFF"), "Info")
         end
     end))
 end
 
+local function setupKillAuraManualTrigger()
+    -- Manual trigger for Kill Aura when E is pressed while Kill Aura is enabled
+    State.connections:Add(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.E and State.killAuraEnabled then
+            task.spawn(executeKillAura)
+        end
+    end))
+end
+
+-- ========== EVENT HANDLERS ==========
+local function onCharacterDeath()
+    State.characterDied = true
+    clearAllHighlights()
+end
+
+local function onCharacterAdded(character)
+    State.characterDied = false
+    
+    safeCall(function()
+        local humanoid = character:WaitForChild("Humanoid", 5)
+        if humanoid then
+            humanoid.Died:Connect(onCharacterDeath)
+        end
+        
+        task.wait(1)
+        
+        setupHighlightContainer()
+        
+        if State.espEnabled then
+            updatePlayerHighlights()
+        end
+    end, "onCharacterAdded", true)
+end
+
+local function setupRespawnHandling()
+    local playersFolder = Workspace:FindFirstChild("Players")
+    if not playersFolder then return end
+    
+    local function cleanupOnDeath(playerModel)
+        if not isLocalPlayerModel(playerModel) then
+            cleanupHighlight(playerModel)
+        end
+    end
+    
+    local function setupDeathTrackingForGroup(group)
+        if not group then return end
+        
+        for _, playerModel in ipairs(group:GetChildren()) do
+            if playerModel:IsA("Model") then
+                local humanoid = playerModel:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    humanoid.Died:Connect(function()
+                        cleanupOnDeath(playerModel)
+                    end)
+                end
+            end
+        end
+        
+        group.ChildAdded:Connect(function(child)
+            if child:IsA("Model") then
+                local humanoid = child:WaitForChild("Humanoid", 2)
+                if humanoid then
+                    humanoid.Died:Connect(function()
+                        cleanupOnDeath(child)
+                    end)
+                end
+            end
+        end)
+    end
+    
+    setupDeathTrackingForGroup(playersFolder:FindFirstChild("Survivors"))
+    setupDeathTrackingForGroup(playersFolder:FindFirstChild("Killers"))
+end
+
 -- ========== INITIALIZATION ==========
 local function initialize()
+    if not localPlayer then
+        State.errorHandler:Log("Initialization", "Failed to get local player", "Error")
+        return false
+    end
+    
     safeCall(function()
+        setupHighlightContainer()
         setupInputHandlers()
-        State.playerESPActive = false
-        State.killAuraActive  = false
-        State.errorHandler:Log(
-            "Init",
-            "Script initialized (Kill Aura off, Player ESP off)",
-            "Info"
-        )
-        print("G&B Hub Revamped - Press F1 for Kill Aura, F2 for Player ESP")
-    end, "Init")
+        setupKillAuraManualTrigger()
+        setupToolHandlers()
+        setupAutoPlay()
+        setupHeadLock()
+        
+        if localPlayer.Character then
+            local humanoid = localPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid.Died:Connect(onCharacterDeath)
+            end
+        end
+        
+        State.connections:Add(localPlayer.CharacterAdded:Connect(onCharacterAdded))
+        
+        setupRespawnHandling()
+        
+        -- Periodic ESP update
+        State.connections:Add(RunService.Heartbeat:Connect(function()
+            if State.espEnabled and os.clock() - State.lastHighlightUpdate > ESP_CONFIG.RefreshRate then
+                updatePlayerHighlights()
+                State.lastHighlightUpdate = os.clock()
+            end
+        end))
+        
+        if State.espEnabled then
+            updatePlayerHighlights()
+        end
+        
+        State.errorHandler:Log("Initialization", "G&B Hub script initialized successfully", "Info")
+        
+        -- Print status message
+        print([[
+
+╔══════════════════════════════════════════════════════════════╗
+║                    G&B Hub - Xavier I.N.C                    ║
+╠══════════════════════════════════════════════════════════════╣
+║  Controls:                                                   ║
+║    F1 - Toggle Kill Aura                                     ║
+║    F2 - Toggle ESP                                           ║
+║    E  - Manual trigger Kill Aura (when enabled)              ║
+╠══════════════════════════════════════════════════════════════╣
+║  Features:                                                   ║
+║    • Player ESP (Low HP / Infected)                          ║
+║    • Kill Aura (Manual trigger with E)                       ║
+║    • Auto-Play (Always Active)                               ║
+║    • Head Lock (Always Active)                               ║
+╚══════════════════════════════════════════════════════════════╝
+        ]])
+    end, "initialize")
+    
     return true
 end
 
 local function cleanup()
     safeCall(function()
-        State.killAuraActive  = false
-        State.playerESPActive = false
-
+        State.killAuraEnabled = false
+        State.espEnabled = false
+        
         State.connections:Destroy()
-        State.espConnections:Destroy()
-
-        -- Restore original weapon functions only if we were the ones who patched them
-        if FlintLock._gbHubPatched then
-            FlintLock.BayonetHitCheck  = originalBayonetHitCheck
-            MeleeBase.MeleeHitCheck    = originalMeleeHitCheck
-            FlintLock._gbHubPatched    = false
+        State.highlightConnections:DisconnectAll()
+        clearAllHighlights()
+        
+        if highlightContainer and highlightContainer.Parent then
+            highlightContainer:Destroy()
+            highlightContainer = nil
         end
-
-        for _, highlight in pairs(State.espHighlights) do
-            if highlight then highlight:Destroy() end
-        end
-        State.espHighlights   = {}
-        State.espPlayerModels = {}
-
-        State.killAuraRayParams     = nil
-        State.killAuraOverlapParams = nil
-    end, "Cleanup", true)
+        
+        State.errorHandler:Log("Cleanup", "G&B Hub script cleaned up", "Info")
+    end, "cleanup", true)
 end
 
 -- ========== MAIN ==========
 local success = safeCall(initialize, "Main")
 if not success then cleanup() end
 
-_G.GBHubInstance = {
-    cleanup        = cleanup,
-    toggleKillAura = toggleKillAura,
-    togglePlayerESP = togglePlayerESP,
+_G.GBHubScriptInstance = {
+    cleanup = cleanup,
+    errorHandler = State.errorHandler,
+    setKillAura = function(enabled) State.killAuraEnabled = enabled end,
+    setESP = function(enabled) 
+        State.espEnabled = enabled
+        if enabled then updatePlayerHighlights() else clearAllHighlights() end
+    end
 }
+
+return cleanup, State.errorHandler
